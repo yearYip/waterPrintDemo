@@ -156,13 +156,24 @@ object FrequencyWatermark {
     class Reader(bitmap: Bitmap) {
         private val source: Plane
         init {
-            val pixels = IntArray(bitmap.width * bitmap.height)
-            bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-            source = Plane.fromPixels(pixels, bitmap.width, bitmap.height)
+            val values = FloatArray(bitmap.width * bitmap.height)
+            val row = IntArray(bitmap.width)
+            for (y in 0 until bitmap.height) {
+                bitmap.getPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1)
+                for (x in row.indices) {
+                    val pixel = row[x]
+                    values[y * bitmap.width + x] =
+                        Color.red(pixel) * 0.299f + Color.green(pixel) * 0.587f +
+                            Color.blue(pixel) * 0.114f
+                }
+            }
+            source = Plane(bitmap.width, bitmap.height, values)
         }
 
         fun extract(corners: FloatArray? = null, refine: Boolean = true): WatermarkPayload? =
             extractPlane(source, corners ?: fullCorners(source.width, source.height), refine)
+
+        fun alignmentScore(corners: FloatArray): Double = pilotScore(source, corners)
 
     }
 

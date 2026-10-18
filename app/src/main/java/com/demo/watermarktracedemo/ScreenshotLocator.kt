@@ -18,7 +18,7 @@ import kotlin.math.sqrt
  * selected image with a valid CRC; this cache never returns provenance data.
  */
 object ScreenshotLocator {
-    private const val LIMIT = 24
+    private const val LIMIT = 72
     private const val DIRECTORY = "watermark_locator"
 
     fun remember(context: Context, bitmap: Bitmap) {
@@ -33,7 +33,8 @@ object ScreenshotLocator {
             try {
                 val thumbnail = thumbnail(piece)
                 try {
-                    val name = "${stamp + index}_${piece.width}_${piece.height}.png"
+                    val kind = if (index == bounds.lastIndex) "F" else "T"
+                    val name = "${stamp + index}_${kind}_${index}_${piece.width}_${piece.height}.png"
                     File(directory, name).outputStream().use {
                         check(thumbnail.compress(Bitmap.CompressFormat.PNG, 100, it))
                     }
@@ -51,14 +52,14 @@ object ScreenshotLocator {
 
     private fun thumbnail(bitmap: Bitmap): Bitmap {
         // Area averaging avoids aliasing tiny texture into the localization template.
-        val pixels = IntArray(bitmap.width * bitmap.height)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        val pixels = IntArray(bitmap.width)
         val sums = DoubleArray(64 * 64)
         val counts = IntArray(64 * 64)
         for (y in 0 until bitmap.height) {
+            bitmap.getPixels(pixels, 0, bitmap.width, 0, y, bitmap.width, 1)
             for (x in 0 until bitmap.width) {
                 val cell = (y * 64 / bitmap.height) * 64 + x * 64 / bitmap.width
-                val p = pixels[y * bitmap.width + x]
+                val p = pixels[x]
                 sums[cell] += Color.red(p) * 0.299 + Color.green(p) * 0.587 + Color.blue(p) * 0.114
                 counts[cell]++
             }
@@ -85,9 +86,10 @@ object ScreenshotLocator {
         val found = mutableListOf<Match>()
         for (file in references) {
             val parts = file.nameWithoutExtension.split('_')
-            if (parts.size != 3) continue
-            val width = parts[1].toFloatOrNull() ?: continue
-            val height = parts[2].toFloatOrNull() ?: continue
+            if (parts.size != 3 && parts.size != 5) continue
+            val isTile = parts.size == 5 && parts[1] == "T"
+            val width = parts[if (parts.size == 5) 3 else 1].toFloatOrNull() ?: continue
+            val height = parts[if (parts.size == 5) 4 else 2].toFloatOrNull() ?: continue
             if (width <= 0 || height <= 0) continue
             val thumbnail = BitmapFactory.decodeFile(file.absolutePath) ?: continue
             val reference = try { Gray.fromBitmap(thumbnail) } finally { thumbnail.recycle() }
@@ -95,7 +97,8 @@ object ScreenshotLocator {
             val fine = descriptor(reference, 16)
             val aspect = width / height
             val maximumWidth = min(image.width.toFloat(), image.height * aspect)
-            val minimumWidth = max(70f, maximumWidth * 0.3f)
+            val minimumWidth = max(if (isTile) 50f else 70f,
+                maximumWidth * (if (isTile) 0.1f else 0.3f))
             var candidateWidth = maximumWidth
             val best = mutableListOf<Match>()
             while (candidateWidth >= minimumWidth) {

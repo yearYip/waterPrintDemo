@@ -221,6 +221,16 @@ class TraceActivity : AppCompatActivity() {
         if (bitCount != null && bitCount.toLong() <= bitmap.width.toLong() * bitmap.height) {
             WatermarkPayload.fromBitArray(HalfToneWatermark.extract(bitmap, bitCount))?.let { return it }
         }
+        val regions = MultiRegionWatermark.regions(bitmap.width, bitmap.height)
+        if (regions.size > 1) {
+            val first = regions.first()
+            decodeExactPngRegion(bitmap, floatArrayOf(
+                first.left.toFloat(), first.top.toFloat(),
+                first.right.toFloat(), first.top.toFloat(),
+                first.right.toFloat(), first.bottom.toFloat(),
+                first.left.toFloat(), first.bottom.toFloat()
+            ))?.let { return it }
+        }
         val reader = FrequencyWatermark.Reader(bitmap)
         reader.extract(refine = false)?.let { return it }
         // Thumbnails only propose image coordinates. The message is decoded from the screenshot.
@@ -388,7 +398,7 @@ class TraceActivity : AppCompatActivity() {
     private companion object {
         const val MAX_SPATIAL_PIXELS = 8_000_000L
         const val MAX_AUTOMATIC_PIXELS = 3_000_000L
-        const val MAX_IMAGE_EDGE = 4000
+        const val MAX_IMAGE_EDGE = 4096
     }
 
     private data class VideoScanResult(

@@ -206,7 +206,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private companion object {
-        const val MAX_IMAGE_EDGE = 1600
+        const val MAX_IMAGE_EDGE = 4096
     }
 
 }

@@ -9,7 +9,7 @@ import kotlin.math.roundToInt
 /** Each region contains the complete payload, so losing other regions does not lose the message. */
 object MultiRegionWatermark {
     private const val MIN_REGION_SIZE = 320
-    private const val MAX_REGIONS_PER_AXIS = 4
+    private const val MAX_REGIONS_PER_AXIS = 8
 
     data class Result(val bitmap: Bitmap, val regions: Int, val screenshotRegions: Int)
 
@@ -84,7 +84,7 @@ object MultiRegionWatermark {
     private fun screenshotReadable(bitmap: Bitmap, expected: WatermarkPayload): Boolean =
         runCatching {
             if (FrequencyWatermark.extract(bitmap, refine = false) != expected) return@runCatching false
-            val scale = min(1f, 384f / min(bitmap.width, bitmap.height))
+            val scale = min(0.85f, 384f / min(bitmap.width, bitmap.height))
             val smaller = if (scale < 1f) Bitmap.createScaledBitmap(
                 bitmap, (bitmap.width * scale).roundToInt(),
                 (bitmap.height * scale).roundToInt(), true
@@ -102,14 +102,11 @@ object MultiRegionWatermark {
         val width = hypot(corners[2] - corners[0], corners[3] - corners[1])
         val height = hypot(corners[6] - corners[0], corners[7] - corners[1])
         if (width < 320f || height < 320f) return null
-        for (rows in 1..4) for (columns in 1..4) {
+        val candidates = mutableListOf<Pair<Double, FloatArray>>()
+        for (rows in 1..MAX_REGIONS_PER_AXIS) for (columns in 1..MAX_REGIONS_PER_AXIS) {
             if (rows * columns < 2) continue
             if (width / columns < 160f || height / rows < 160f) continue
-            val cornersToTry = listOf(
-                0 to 0, 0 to (columns - 1),
-                (rows - 1) to 0, (rows - 1) to (columns - 1)
-            ).distinct()
-            for ((row, column) in cornersToTry) {
+            for (row in 0 until rows) for (column in 0 until columns) {
                 val tile = FloatArray(8)
                 for (point in 0 until 4) {
                     val u = (column + if (point == 1 || point == 2) 1 else 0).toFloat() / columns
@@ -119,8 +116,12 @@ object MultiRegionWatermark {
                     tile[point * 2 + 1] = corners[1] * (1 - u) * (1 - v) +
                         corners[3] * u * (1 - v) + corners[5] * u * v + corners[7] * (1 - u) * v
                 }
-                reader.extract(tile, refine = false)?.let { return it }
+                val score = reader.alignmentScore(tile)
+                if (score.isFinite()) candidates.add(score to tile)
             }
+        }
+        for ((_, tile) in candidates.sortedByDescending { it.first }.take(32)) {
+            reader.extract(tile)?.let { return it }
         }
         return null
     }
