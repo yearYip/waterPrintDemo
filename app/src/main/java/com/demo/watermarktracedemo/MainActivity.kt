@@ -104,7 +104,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 result.onSuccess { generated ->
                     watermarkView.setWatermarkBitmap(generated.bitmap)
-                    status.text = if (generated.screenshotVerified) {
+                    status.text = if (generated.regions > 1) {
+                        "已写入 ${generated.regions} 个完整水印区域，其中 ${generated.screenshotRegions} 个支持缩放截图回读。局部图片需保留至少一个完整区域。"
+                    } else if (generated.screenshotVerified) {
                         "水印已生成，已通过原图和缩放回读校验。"
                     } else {
                         "水印已生成：请使用保存的 PNG 原图解析。当前图片未通过截图提取校验。"

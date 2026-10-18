@@ -20,6 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 class TraceActivity : AppCompatActivity() {
     private lateinit var tvResult: TextView
@@ -90,7 +91,7 @@ class TraceActivity : AppCompatActivity() {
                         bitmap.recycle()
                         showPayload(payload)
                     }
-                    else showAlignment(bitmap, "自动解析未成功。请按左上、右上、右下、左下顺序选取水印图片本身的四角。")
+                    else showAlignment(bitmap, "自动解析未成功。请按左上、右上、右下、左下顺序选取整张图片或一个完整水印区域的四角。")
                 },
                 onFailure = { tvResult.text = "图片读取失败：${it.message ?: "未知错误"}" }
             )
@@ -138,7 +139,7 @@ class TraceActivity : AppCompatActivity() {
                         videoSeek.progress = 500
                         showAlignment(
                             scan.frame!!,
-                            "未在抽样帧中自动识别。可拖动视频位置，再按顺序选取水印图片的四角。"
+                            "未在抽样帧中自动识别。可拖动视频位置，再按顺序选取整张图片或一个完整水印区域的四角。"
                         )
                     }
                 },
@@ -165,7 +166,7 @@ class TraceActivity : AppCompatActivity() {
             result.fold(
                 onSuccess = { frame ->
                     hideAlignment()
-                    showAlignment(frame, "请按左上、右上、右下、左下顺序选取水印图片本身的四角。")
+                    showAlignment(frame, "请按左上、右上、右下、左下顺序选取整张图片或一个完整水印区域的四角。")
                 },
                 onFailure = { tvResult.text = "载入帧失败：${it.message ?: "未知错误"}" }
             )
@@ -206,7 +207,7 @@ class TraceActivity : AppCompatActivity() {
             result.fold(
                 onSuccess = { payload ->
                     if (payload != null) showPayload(payload)
-                    else tvResult.text = "未能通过水印校验。请框选完整图片的四角，避免包含按钮或界面留白；严重缩小、裁剪或拍屏失焦可能无法恢复。"
+                    else tvResult.text = "未能通过水印校验。请框选整张图片或一个完整水印区域，避免包含按钮和界面留白；若裁剪切断了所有完整区域，或拍屏失焦，可能无法恢复。"
                 },
                 onFailure = { tvResult.text = "校正失败：${it.message ?: "未知错误"}" }
             )
@@ -223,9 +224,21 @@ class TraceActivity : AppCompatActivity() {
         val reader = FrequencyWatermark.Reader(bitmap)
         reader.extract(refine = false)?.let { return it }
         // Thumbnails only propose image coordinates. The message is decoded from the screenshot.
-        for (corners in ScreenshotLocator.candidates(this, bitmap)) {
+        val located = ScreenshotLocator.candidates(this, bitmap)
+        for (corners in located) {
+            decodeExactPngRegion(bitmap, corners)?.let { return it }
             reader.extract(corners)?.let { return it }
         }
+        located.firstOrNull()?.let { corners ->
+            MultiRegionWatermark.extractFromBounds(reader, corners)?.let { return it }
+        }
+        MultiRegionWatermark.extractFromBounds(
+            reader, floatArrayOf(
+                0f, 0f, bitmap.width.toFloat(), 0f,
+                bitmap.width.toFloat(), bitmap.height.toFloat(),
+                0f, bitmap.height.toFloat()
+            )
+        )?.let { return it }
         if (bitmap.width == SpatialWatermark.WIDTH && bitmap.height == SpatialWatermark.HEIGHT) {
             SpatialWatermark.decode(bitmap)?.let { return it }
         }
@@ -256,7 +269,9 @@ class TraceActivity : AppCompatActivity() {
     }
 
     private fun decodeAligned(source: Bitmap, corners: FloatArray): WatermarkPayload? {
+        decodeExactPngRegion(source, corners)?.let { return it }
         FrequencyWatermark.extract(source, corners)?.let { return it }
+        MultiRegionWatermark.extractFromBounds(FrequencyWatermark.Reader(source), corners)?.let { return it }
         val target = floatArrayOf(
             0f, 0f,
             SpatialWatermark.WIDTH.toFloat(), 0f,
@@ -276,6 +291,24 @@ class TraceActivity : AppCompatActivity() {
                 ?: decodeAlignedTiled(source, corners)
         } finally {
             corrected.recycle()
+        }
+    }
+
+    private fun decodeExactPngRegion(source: Bitmap, corners: FloatArray): WatermarkPayload? {
+        if (corners.size != 8) return null
+        val left = corners[0].roundToInt().coerceIn(0, source.width - 1)
+        val top = corners[1].roundToInt().coerceIn(0, source.height - 1)
+        val right = corners[4].roundToInt().coerceIn(left + 1, source.width)
+        val bottom = corners[5].roundToInt().coerceIn(top + 1, source.height)
+        if (right - left < 48 || bottom - top < 1) return null
+        val crop = Bitmap.createBitmap(source, left, top, right - left, bottom - top)
+        return try {
+            val header = HalfToneWatermark.extract(crop, WatermarkPayload.HEADER_BITS)
+            val count = WatermarkPayload.requiredBitCount(header) ?: return null
+            if (count > crop.width.toLong() * crop.height) return null
+            WatermarkPayload.fromBitArray(HalfToneWatermark.extract(crop, count))
+        } finally {
+            if (crop !== source) crop.recycle()
         }
     }
 

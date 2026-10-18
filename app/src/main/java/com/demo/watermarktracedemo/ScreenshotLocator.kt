@@ -13,24 +13,36 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * Finds a previously generated photo inside a screenshot, including app chrome.
+ * Finds a previously generated photo or one of its watermarked regions in a screenshot.
  * Only visual thumbnails are cached. A payload must still decode from the actual
  * selected image with a valid CRC; this cache never returns provenance data.
  */
 object ScreenshotLocator {
-    private const val LIMIT = 8
+    private const val LIMIT = 24
     private const val DIRECTORY = "watermark_locator"
 
     fun remember(context: Context, bitmap: Bitmap) {
         val directory = File(context.filesDir, DIRECTORY)
         check(directory.isDirectory || directory.mkdirs())
-        val name = System.currentTimeMillis().toString() + "_" + bitmap.width + "_" + bitmap.height + ".png"
-        val file = File(directory, name)
-        val thumbnail = thumbnail(bitmap)
-        try {
-            file.outputStream().use { check(thumbnail.compress(Bitmap.CompressFormat.PNG, 100, it)) }
-        } finally {
-            if (thumbnail !== bitmap) thumbnail.recycle()
+        val stamp = System.currentTimeMillis()
+        val tiles = MultiRegionWatermark.regions(bitmap.width, bitmap.height)
+        val whole = android.graphics.Rect(0, 0, bitmap.width, bitmap.height)
+        val bounds = if (tiles.size > 1) tiles + whole else listOf(whole)
+        for ((index, region) in bounds.withIndex()) {
+            val piece = Bitmap.createBitmap(bitmap, region.left, region.top, region.width(), region.height())
+            try {
+                val thumbnail = thumbnail(piece)
+                try {
+                    val name = "${stamp + index}_${piece.width}_${piece.height}.png"
+                    File(directory, name).outputStream().use {
+                        check(thumbnail.compress(Bitmap.CompressFormat.PNG, 100, it))
+                    }
+                } finally {
+                    thumbnail.recycle()
+                }
+            } finally {
+                if (piece !== bitmap) piece.recycle()
+            }
         }
         directory.listFiles()?.filter { it.extension == "png" }
             ?.sortedByDescending { it.name.substringBefore('_').toLongOrNull() ?: 0L }
