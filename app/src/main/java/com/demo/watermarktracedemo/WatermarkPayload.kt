@@ -28,7 +28,7 @@ data class WatermarkPayload(
     companion object {
         private const val HEADER_BYTES = 6
         private const val CHECKSUM_BYTES = 4
-        private val MAGIC = byteArrayOf('W'.code.toByte(), 'M'.code.toByte(), 'K'.code.toByte(), '1'.code.toByte())
+        private val MAGIC = byteArrayOf('W'.code.toByte(), 'M'.code.toByte(), 'K'.code.toByte(), '2'.code.toByte())
         const val HEADER_BITS = HEADER_BYTES * 8
 
         fun requiredBitCount(headerBits: BooleanArray): Int? {

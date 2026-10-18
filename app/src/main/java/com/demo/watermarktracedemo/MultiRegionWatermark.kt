@@ -2,20 +2,19 @@ package com.demo.watermarktracedemo
 
 import android.graphics.Bitmap
 import android.graphics.Rect
-import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** Each region contains the complete payload, so losing other regions does not lose the message. */
 object MultiRegionWatermark {
     private const val MIN_REGION_SIZE = 320
-    private const val MAX_REGIONS_PER_AXIS = 8
+    private const val MAX_GENERATED_REGIONS_PER_AXIS = 6
 
     data class Result(val bitmap: Bitmap, val regions: Int, val screenshotRegions: Int)
 
     fun regions(width: Int, height: Int): List<Rect> {
-        val columns = (width / MIN_REGION_SIZE).coerceIn(1, MAX_REGIONS_PER_AXIS)
-        val rows = (height / MIN_REGION_SIZE).coerceIn(1, MAX_REGIONS_PER_AXIS)
+        val columns = (width / MIN_REGION_SIZE).coerceIn(1, MAX_GENERATED_REGIONS_PER_AXIS)
+        val rows = (height / MIN_REGION_SIZE).coerceIn(1, MAX_GENERATED_REGIONS_PER_AXIS)
         return buildList {
             for (row in 0 until rows) for (column in 0 until columns) {
                 add(Rect(
@@ -28,9 +27,11 @@ object MultiRegionWatermark {
         }
     }
 
-    fun embed(source: Bitmap, bits: BooleanArray): Result {
+    fun embed(source: Bitmap, bits: BooleanArray, onProgress: (String) -> Unit = {}): Result {
         val regions = regions(source.width, source.height)
-        require(regions.size > 1) { "图片尺寸不足以分成多个水印区域" }
+        require(regions.all { min(it.width(), it.height()) >= 64 }) {
+            "图片太小，无法写入角点定位信号"
+        }
         require(regions.all { it.width().toLong() * it.height() >= bits.size }) {
             "水印区域太小，无法容纳完整数据"
         }
@@ -38,7 +39,8 @@ object MultiRegionWatermark {
         val output = source.copy(Bitmap.Config.ARGB_8888, true)
         var screenshotRegions = 0
         try {
-            for (region in regions) {
+            for ((index, region) in regions.withIndex()) {
+                onProgress("正在写入水印区域 ${index + 1}/${regions.size}…")
                 val tile = Bitmap.createBitmap(
                     source, region.left, region.top, region.width(), region.height()
                 )
@@ -48,9 +50,14 @@ object MultiRegionWatermark {
                     } catch (_: FrequencyWatermark.CarrierException) {
                         null
                     }
-                    // Keep an exact-PNG copy in every region, including frequency regions.
+                    // The chroma pilots mark each tile corner; the PNG payload is written last.
                     val marked = try {
-                        HalfToneWatermark.embed(frequency ?: tile, bits)
+                        val located = CornerLocator.embed(frequency ?: tile)
+                        try {
+                            HalfToneWatermark.embed(located, bits)
+                        } finally {
+                            located.recycle()
+                        }
                     } finally {
                         frequency?.recycle()
                     }
@@ -58,6 +65,7 @@ object MultiRegionWatermark {
                         check(WatermarkPayload.fromBitArray(
                             HalfToneWatermark.extract(marked, bits.size)
                         ) == expected) { "水印区域的 PNG 原图回读失败" }
+                        onProgress("正在校验水印区域 ${index + 1}/${regions.size}…")
                         if (frequency != null && screenshotReadable(marked, expected)) {
                             screenshotRegions++
                         }
@@ -96,33 +104,4 @@ object MultiRegionWatermark {
             }
         }.getOrDefault(false)
 
-    /** Try plausible grids when the complete image bounds are known. */
-    fun extractFromBounds(reader: FrequencyWatermark.Reader, corners: FloatArray): WatermarkPayload? {
-        if (corners.size != 8) return null
-        val width = hypot(corners[2] - corners[0], corners[3] - corners[1])
-        val height = hypot(corners[6] - corners[0], corners[7] - corners[1])
-        if (width < 320f || height < 320f) return null
-        val candidates = mutableListOf<Pair<Double, FloatArray>>()
-        for (rows in 1..MAX_REGIONS_PER_AXIS) for (columns in 1..MAX_REGIONS_PER_AXIS) {
-            if (rows * columns < 2) continue
-            if (width / columns < 160f || height / rows < 160f) continue
-            for (row in 0 until rows) for (column in 0 until columns) {
-                val tile = FloatArray(8)
-                for (point in 0 until 4) {
-                    val u = (column + if (point == 1 || point == 2) 1 else 0).toFloat() / columns
-                    val v = (row + if (point >= 2) 1 else 0).toFloat() / rows
-                    tile[point * 2] = corners[0] * (1 - u) * (1 - v) +
-                        corners[2] * u * (1 - v) + corners[4] * u * v + corners[6] * (1 - u) * v
-                    tile[point * 2 + 1] = corners[1] * (1 - u) * (1 - v) +
-                        corners[3] * u * (1 - v) + corners[5] * u * v + corners[7] * (1 - u) * v
-                }
-                val score = reader.alignmentScore(tile)
-                if (score.isFinite()) candidates.add(score to tile)
-            }
-        }
-        for ((_, tile) in candidates.sortedByDescending { it.first }.take(32)) {
-            reader.extract(tile)?.let { return it }
-        }
-        return null
-    }
 }

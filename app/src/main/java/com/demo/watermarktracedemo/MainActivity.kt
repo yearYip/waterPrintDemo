@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.Settings
 import android.view.View
@@ -25,12 +26,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
     private lateinit var etUserId: EditText
     private lateinit var watermarkView: WatermarkView
     private lateinit var deviceId: String
     private var pendingSaveBitmap: Bitmap? = null
+    private var pendingSaveSummary: String = ""
 
     private val pickImage = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) generateWatermark(uri)
@@ -39,9 +42,10 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         val bitmap = pendingSaveBitmap
+        val summary = pendingSaveSummary
         pendingSaveBitmap = null
         if (granted && bitmap != null) {
-            saveImage(bitmap)
+            saveImage(bitmap, summary)
         } else if (bitmap != null) {
             Toast.makeText(this, "水印已生成，但未保存到相册", Toast.LENGTH_LONG).show()
         }
@@ -87,16 +91,19 @@ class MainActivity : AppCompatActivity() {
 
         val generateButton = findViewById<Button>(R.id.btn_gen_watermark)
         val status = findViewById<TextView>(R.id.tv_watermark_status)
+        val startedAt = SystemClock.elapsedRealtime()
         generateButton.isEnabled = false
         status.visibility = View.VISIBLE
-        status.text = "正在生成隐形水印…"
+        status.text = "正在读取图片…"
         lifecycleScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
                     runCatching {
                         val source = loadBitmap(uri)
                         try {
-                            WatermarkGenerator.generate(source, bits)
+                            WatermarkGenerator.generate(source, bits) { message ->
+                                status.post { status.text = message }
+                            }
                         } finally {
                             source.recycle()
                         }
@@ -104,16 +111,18 @@ class MainActivity : AppCompatActivity() {
                 }
                 result.onSuccess { generated ->
                     watermarkView.setWatermarkBitmap(generated.bitmap)
-                    status.text = if (generated.regions > 1) {
+                    val summary = if (generated.regions > 1) {
                         "已写入 ${generated.regions} 个完整水印区域，其中 ${generated.screenshotRegions} 个支持缩放截图回读。局部图片需保留至少一个完整区域。"
                     } else if (generated.screenshotVerified) {
                         "水印已生成，已通过原图和缩放回读校验。"
                     } else {
                         "水印已生成：请使用保存的 PNG 原图解析。当前图片未通过截图提取校验。"
                     }
-                    saveImageToGallery(generated.bitmap)
+                    val timedSummary = "生成用时 ${elapsedText(startedAt)}。$summary"
+                    status.text = timedSummary
+                    saveImageToGallery(generated.bitmap, timedSummary)
                 }.onFailure {
-                    status.text = "生成失败：" + it.message
+                    status.text = "生成失败（用时 ${elapsedText(startedAt)}）：${it.message}"
                     Toast.makeText(this@MainActivity, "生成失败：" + it.message, Toast.LENGTH_LONG).show()
                 }
             } finally {
@@ -122,31 +131,34 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun saveImageToGallery(bitmap: Bitmap) {
+    private fun saveImageToGallery(bitmap: Bitmap, summary: String) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
             PackageManager.PERMISSION_GRANTED
         ) {
             pendingSaveBitmap = bitmap
+            pendingSaveSummary = summary
             requestStoragePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         } else {
-            saveImage(bitmap)
+            saveImage(bitmap, summary)
         }
     }
 
-    private fun saveImage(bitmap: Bitmap) {
+    private fun saveImage(bitmap: Bitmap, summary: String) {
+        val status = findViewById<TextView>(R.id.tv_watermark_status)
+        status.text = "正在保存 PNG 图片…"
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val uri = savePng(bitmap)
-                    // Localization is optional; cache failures must not hide a successful save.
-                    runCatching { ScreenshotLocator.remember(this@MainActivity, bitmap) }
                     uri
                 }
             }
             result.onSuccess {
+                status.text = "已保存到相册。$summary"
                 Toast.makeText(this@MainActivity, "水印已保存到相册", Toast.LENGTH_SHORT).show()
             }.onFailure {
+                status.text = "水印已生成，但保存失败：${it.message}"
                 Toast.makeText(this@MainActivity, "水印已生成，但保存失败：${it.message}", Toast.LENGTH_LONG).show()
             }
         }
@@ -204,6 +216,10 @@ class MainActivity : AppCompatActivity() {
             BitmapFactory.decodeStream(stream, null, options)
         } ?: error("无法解码图片")
     }
+
+    private fun elapsedText(startedAt: Long): String = String.format(
+        Locale.getDefault(), "%.1f 秒", (SystemClock.elapsedRealtime() - startedAt) / 1000.0
+    )
 
     private companion object {
         const val MAX_IMAGE_EDGE = 4096

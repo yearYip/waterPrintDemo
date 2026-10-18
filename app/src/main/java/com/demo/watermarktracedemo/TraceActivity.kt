@@ -2,13 +2,10 @@ package com.demo.watermarktracedemo
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Matrix
-import android.graphics.Paint
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.View
 import android.widget.Button
 import android.widget.SeekBar
@@ -21,6 +18,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
+import java.util.Locale
 
 class TraceActivity : AppCompatActivity() {
     private lateinit var tvResult: TextView
@@ -73,32 +71,43 @@ class TraceActivity : AppCompatActivity() {
     }
 
     private fun loadImage(uri: Uri) {
+        val startedAt = SystemClock.elapsedRealtime()
         activeJob?.cancel()
         videoUri = null
         videoDurationMs = 0L
         hideAlignment()
         activeJob = lifecycleScope.launch {
-            tvResult.text = "正在解析图片…"
+            tvResult.text = "正在读取图片…"
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val bitmap = loadBitmap(uri)
-                    bitmap to decodeAutomatic(bitmap)
+                    try {
+                        bitmap to decodeAutomatic(bitmap, ::showProgress)
+                    } catch (error: Exception) {
+                        bitmap.recycle()
+                        throw error
+                    }
                 }
             }
             result.fold(
-                onSuccess = { (bitmap, payload) ->
-                    if (payload != null) {
+                onSuccess = { (bitmap, decoded) ->
+                    if (decoded.payload != null) {
                         bitmap.recycle()
-                        showPayload(payload)
+                        showPayload(decoded.payload, startedAt)
+                    } else if (decoded.noCompleteRegion) {
+                        bitmap.recycle()
+                        tvResult.text = noRegionMessage(startedAt)
+                    } else {
+                        showAlignment(bitmap, "自动解析未成功（用时 ${elapsedText(startedAt)}）。请选取一个完整水印区域的四角。")
                     }
-                    else showAlignment(bitmap, "自动解析未成功。请按左上、右上、右下、左下顺序选取整张图片或一个完整水印区域的四角。")
                 },
-                onFailure = { tvResult.text = "图片读取失败：${it.message ?: "未知错误"}" }
+                onFailure = { tvResult.text = "解析失败（用时 ${elapsedText(startedAt)}）：${it.message ?: "未知错误"}" }
             )
         }
     }
 
     private fun loadVideo(uri: Uri) {
+        val startedAt = SystemClock.elapsedRealtime()
         activeJob?.cancel()
         videoUri = uri
         hideAlignment()
@@ -110,7 +119,9 @@ class TraceActivity : AppCompatActivity() {
                         val times = sampleTimes(retriever)
                         val durationMs = videoDuration(retriever)
                         var preview: Bitmap? = null
+                        var foundRegion = false
                         for ((index, timeMs) in times.withIndex()) {
+                            showProgress("正在抽取录屏画面 ${index + 1}/${times.size}…")
                             val frame = retriever.getFrameAtTime(
                                 timeMs * 1000,
                                 MediaMetadataRetriever.OPTION_CLOSEST_SYNC
@@ -119,31 +130,37 @@ class TraceActivity : AppCompatActivity() {
                                 preview?.recycle()
                                 preview = frame
                             }
-                            val payload = decodeAutomatic(frame)
-                            if (payload != null) {
+                            val decoded = decodeAutomatic(frame, ::showProgress)
+                            if (!decoded.noCompleteRegion) foundRegion = true
+                            if (decoded.payload != null) {
                                 if (frame !== preview) frame.recycle()
                                 preview?.recycle()
-                                return@withRetriever VideoScanResult(payload, null, durationMs)
+                                return@withRetriever VideoScanResult(decoded.payload, null, durationMs, false)
                             }
                             if (frame !== preview) frame.recycle()
                         }
-                        VideoScanResult(null, preview ?: error("无法抽取视频画面"), durationMs)
+                        VideoScanResult(
+                            null, preview ?: error("无法抽取视频画面"), durationMs, !foundRegion
+                        )
                     }
                 }
             }
             result.fold(
                 onSuccess = { scan ->
                     videoDurationMs = scan.durationMs
-                    if (scan.payload != null) showPayload(scan.payload)
-                    else {
+                    if (scan.payload != null) showPayload(scan.payload, startedAt)
+                    else if (scan.noCompleteRegion) {
+                        scan.frame?.recycle()
+                        tvResult.text = noRegionMessage(startedAt)
+                    } else {
                         videoSeek.progress = 500
                         showAlignment(
                             scan.frame!!,
-                            "未在抽样帧中自动识别。可拖动视频位置，再按顺序选取整张图片或一个完整水印区域的四角。"
+                            "未在抽样帧中自动识别（用时 ${elapsedText(startedAt)}）。可拖动视频位置，再选取完整区域的四角。"
                         )
                     }
                 },
-                onFailure = { tvResult.text = "视频读取失败：${it.message ?: "未知错误"}" }
+                onFailure = { tvResult.text = "解析失败（用时 ${elapsedText(startedAt)}）：${it.message ?: "未知错误"}" }
             )
         }
     }
@@ -174,6 +191,7 @@ class TraceActivity : AppCompatActivity() {
     }
 
     private fun decodeSelectedRegion() {
+        val startedAt = SystemClock.elapsedRealtime()
         val corners = selection.corners()
         val preview = previewBitmap
         if (corners == null || preview == null) {
@@ -185,41 +203,48 @@ class TraceActivity : AppCompatActivity() {
             tvResult.text = "正在校正并解析…"
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    decodeAligned(preview, corners)?.let { return@runCatching it }
-                    val uri = videoUri ?: return@runCatching null
+                    val first = decodeAligned(preview, corners, ::showProgress)
+                    if (first.payload != null || first.noCompleteRegion) return@runCatching first
+                    val uri = videoUri ?: return@runCatching first
                     withRetriever(uri) { retriever ->
                         for (timeMs in sampleTimes(retriever)) {
                             val frame = retriever.getFrameAtTime(
                                 timeMs * 1000,
                                 MediaMetadataRetriever.OPTION_CLOSEST_SYNC
                             ) ?: continue
-                            val payload = try {
-                                decodeAligned(frame, corners)
+                            val decoded = try {
+                                decodeAligned(frame, corners, ::showProgress)
                             } finally {
                                 frame.recycle()
                             }
-                            if (payload != null) return@withRetriever payload
+                            if (decoded.payload != null || decoded.noCompleteRegion) {
+                                return@withRetriever decoded
+                            }
                         }
-                        null
+                        DecodeResult()
                     }
                 }
             }
             result.fold(
-                onSuccess = { payload ->
-                    if (payload != null) showPayload(payload)
-                    else tvResult.text = "未能通过水印校验。请框选整张图片或一个完整水印区域，避免包含按钮和界面留白；若裁剪切断了所有完整区域，或拍屏失焦，可能无法恢复。"
+                onSuccess = { decoded ->
+                    if (decoded.payload != null) showPayload(decoded.payload, startedAt)
+                    else if (decoded.noCompleteRegion) tvResult.text = noRegionMessage(startedAt)
+                    else tvResult.text = "未能通过水印校验（用时 ${elapsedText(startedAt)}）。请框选一个完整区域，避免包含按钮或界面留白。"
                 },
-                onFailure = { tvResult.text = "校正失败：${it.message ?: "未知错误"}" }
+                onFailure = { tvResult.text = "校正失败（用时 ${elapsedText(startedAt)}）：${it.message ?: "未知错误"}" }
             )
         }
     }
 
-    private fun decodeAutomatic(bitmap: Bitmap): WatermarkPayload? {
+    private fun decodeAutomatic(bitmap: Bitmap, onProgress: (String) -> Unit): DecodeResult {
+        onProgress("正在读取水印数据…")
         // Exact PNG watermarks need no screenshot localization or frequency search.
         val header = HalfToneWatermark.extract(bitmap, WatermarkPayload.HEADER_BITS)
         val bitCount = WatermarkPayload.requiredBitCount(header)
         if (bitCount != null && bitCount.toLong() <= bitmap.width.toLong() * bitmap.height) {
-            WatermarkPayload.fromBitArray(HalfToneWatermark.extract(bitmap, bitCount))?.let { return it }
+            WatermarkPayload.fromBitArray(HalfToneWatermark.extract(bitmap, bitCount))?.let {
+                return DecodeResult(it)
+            }
         }
         val regions = MultiRegionWatermark.regions(bitmap.width, bitmap.height)
         if (regions.size > 1) {
@@ -229,36 +254,40 @@ class TraceActivity : AppCompatActivity() {
                 first.right.toFloat(), first.top.toFloat(),
                 first.right.toFloat(), first.bottom.toFloat(),
                 first.left.toFloat(), first.bottom.toFloat()
-            ))?.let { return it }
+            ))?.let { return DecodeResult(it) }
         }
         val reader = FrequencyWatermark.Reader(bitmap)
-        reader.extract(refine = false)?.let { return it }
-        // Thumbnails only propose image coordinates. The message is decoded from the screenshot.
-        val located = ScreenshotLocator.candidates(this, bitmap)
-        for (corners in located) {
-            decodeExactPngRegion(bitmap, corners)?.let { return it }
-            reader.extract(corners)?.let { return it }
+        return decodeLocated(bitmap, reader, onProgress)
+    }
+
+    private fun decodeLocated(
+        bitmap: Bitmap,
+        reader: FrequencyWatermark.Reader,
+        onProgress: (String) -> Unit,
+        manualCorners: FloatArray? = null
+    ): DecodeResult {
+        onProgress("正在寻找水印角点…")
+        var earlyPayload: WatermarkPayload? = null
+        val candidates = CornerLocator.candidates(bitmap) { corners ->
+            onProgress("已找到候选区域，正在校验水印…")
+            earlyPayload = decodeExactPngRegion(bitmap, corners)
+                ?: reader.extract(corners, refine = false)
+            earlyPayload != null
         }
-        located.firstOrNull()?.let { corners ->
-            MultiRegionWatermark.extractFromBounds(reader, corners)?.let { return it }
+        earlyPayload?.let { return DecodeResult(it) }
+        if (candidates.isEmpty()) return DecodeResult(noCompleteRegion = true)
+        onProgress("正在校正候选区域…")
+        if (manualCorners != null) {
+            reader.extract(manualCorners)?.let { return DecodeResult(it) }
         }
-        MultiRegionWatermark.extractFromBounds(
-            reader, floatArrayOf(
-                0f, 0f, bitmap.width.toFloat(), 0f,
-                bitmap.width.toFloat(), bitmap.height.toFloat(),
-                0f, bitmap.height.toFloat()
-            )
-        )?.let { return it }
-        if (bitmap.width == SpatialWatermark.WIDTH && bitmap.height == SpatialWatermark.HEIGHT) {
-            SpatialWatermark.decode(bitmap)?.let { return it }
+        for (corners in candidates) {
+            decodeExactPngRegion(bitmap, corners)?.let { return DecodeResult(it) }
+            reader.extract(corners, refine = false)?.let { return DecodeResult(it) }
         }
-        val pixelCount = bitmap.width.toLong() * bitmap.height
-        if (pixelCount <= MAX_SPATIAL_PIXELS) {
-            SpatialWatermark.findFramedPanel(bitmap)?.let { return it }
-            SpatialWatermark.decodeScaled(bitmap)?.let { return it }
+        for (corners in candidates.take(4)) {
+            reader.extract(corners)?.let { return DecodeResult(it) }
         }
-        if (pixelCount > MAX_AUTOMATIC_PIXELS) return null
-        return HalfToneWatermark.findInScreenshot(bitmap)
+        return DecodeResult()
     }
 
     private fun loadBitmap(uri: Uri): Bitmap {
@@ -278,30 +307,15 @@ class TraceActivity : AppCompatActivity() {
         } ?: error("无法解码图片")
     }
 
-    private fun decodeAligned(source: Bitmap, corners: FloatArray): WatermarkPayload? {
-        decodeExactPngRegion(source, corners)?.let { return it }
-        FrequencyWatermark.extract(source, corners)?.let { return it }
-        MultiRegionWatermark.extractFromBounds(FrequencyWatermark.Reader(source), corners)?.let { return it }
-        val target = floatArrayOf(
-            0f, 0f,
-            SpatialWatermark.WIDTH.toFloat(), 0f,
-            SpatialWatermark.WIDTH.toFloat(), SpatialWatermark.HEIGHT.toFloat(),
-            0f, SpatialWatermark.HEIGHT.toFloat()
-        )
-        val matrix = Matrix()
-        if (!matrix.setPolyToPoly(corners, 0, target, 0, 4)) return null
-        val corrected = Bitmap.createBitmap(
-            SpatialWatermark.WIDTH, SpatialWatermark.HEIGHT, Bitmap.Config.ARGB_8888
-        )
-        corrected.eraseColor(Color.WHITE)
-        Canvas(corrected).drawBitmap(source, matrix, Paint(Paint.FILTER_BITMAP_FLAG))
-        return try {
-            SpatialWatermark.decode(corrected)
-                ?: SpatialWatermark.decodeIncludingFrame(corrected)
-                ?: decodeAlignedTiled(source, corners)
-        } finally {
-            corrected.recycle()
-        }
+    private fun decodeAligned(
+        source: Bitmap,
+        corners: FloatArray,
+        onProgress: (String) -> Unit
+    ): DecodeResult {
+        onProgress("正在校正并验证选中区域…")
+        decodeExactPngRegion(source, corners)?.let { return DecodeResult(it) }
+        val reader = FrequencyWatermark.Reader(source)
+        return decodeLocated(source, reader, onProgress, corners)
     }
 
     private fun decodeExactPngRegion(source: Bitmap, corners: FloatArray): WatermarkPayload? {
@@ -319,29 +333,6 @@ class TraceActivity : AppCompatActivity() {
             WatermarkPayload.fromBitArray(HalfToneWatermark.extract(crop, count))
         } finally {
             if (crop !== source) crop.recycle()
-        }
-    }
-
-    private fun decodeAlignedTiled(source: Bitmap, corners: FloatArray): WatermarkPayload? {
-        val target = floatArrayOf(
-            0f, 0f,
-            (SpatialWatermark.WIDTH * 2).toFloat(), 0f,
-            (SpatialWatermark.WIDTH * 2).toFloat(), (SpatialWatermark.HEIGHT * 2).toFloat(),
-            0f, (SpatialWatermark.HEIGHT * 2).toFloat()
-        )
-        val matrix = Matrix()
-        if (!matrix.setPolyToPoly(corners, 0, target, 0, 4)) return null
-        val corrected = Bitmap.createBitmap(
-            SpatialWatermark.WIDTH * 2,
-            SpatialWatermark.HEIGHT * 2,
-            Bitmap.Config.ARGB_8888
-        )
-        corrected.eraseColor(Color.WHITE)
-        return try {
-            Canvas(corrected).drawBitmap(source, matrix, Paint(Paint.FILTER_BITMAP_FLAG))
-            SpatialWatermark.decodeScaled(corrected)
-        } finally {
-            corrected.recycle()
         }
     }
 
@@ -389,21 +380,38 @@ class TraceActivity : AppCompatActivity() {
         videoTime.visibility = View.GONE
     }
 
-    private fun showPayload(payload: WatermarkPayload) {
-        hideAlignment()
-        tvResult.text =
-            "水印解析成功\n用户 ID: ${payload.userId}\n设备 ID: ${payload.deviceId}\n时间戳: ${payload.timestamp}"
+    private fun showProgress(message: String) {
+        tvResult.post {
+            if (activeJob?.isActive == true) tvResult.text = message
+        }
     }
 
+    private fun showPayload(payload: WatermarkPayload, startedAt: Long) {
+        hideAlignment()
+        tvResult.text =
+            "水印解析成功（用时 ${elapsedText(startedAt)}）\n用户 ID: ${payload.userId}\n设备 ID: ${payload.deviceId}\n时间戳: ${payload.timestamp}"
+    }
+
+    private fun noRegionMessage(startedAt: Long): String =
+        "未找到包含四个角点的完整水印区域，已停止解析（用时 ${elapsedText(startedAt)}）。请选择保留完整区域的局部图片。"
+
+    private fun elapsedText(startedAt: Long): String = String.format(
+        Locale.getDefault(), "%.1f 秒", (SystemClock.elapsedRealtime() - startedAt) / 1000.0
+    )
+
     private companion object {
-        const val MAX_SPATIAL_PIXELS = 8_000_000L
-        const val MAX_AUTOMATIC_PIXELS = 3_000_000L
         const val MAX_IMAGE_EDGE = 4096
     }
 
     private data class VideoScanResult(
         val payload: WatermarkPayload?,
         val frame: Bitmap?,
-        val durationMs: Long
+        val durationMs: Long,
+        val noCompleteRegion: Boolean
+    )
+
+    private data class DecodeResult(
+        val payload: WatermarkPayload? = null,
+        val noCompleteRegion: Boolean = false
     )
 }

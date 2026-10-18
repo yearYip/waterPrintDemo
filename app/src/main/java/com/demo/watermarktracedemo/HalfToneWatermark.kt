@@ -53,7 +53,7 @@ object HalfToneWatermark {
     }
 
     fun findInScreenshot(bmp: Bitmap): WatermarkPayload? {
-        val magic = 0x574d4b31 // "WMK1", MSB first
+        val magic = 0x574d4b32 // "WMK2", MSB first
         for (y in 0 until bmp.height) {
             var window = 0
             for (x in 0 until bmp.width) {
