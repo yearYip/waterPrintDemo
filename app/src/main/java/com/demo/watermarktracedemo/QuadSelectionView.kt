@@ -18,8 +18,14 @@ class QuadSelectionView @JvmOverloads constructor(
 ) : View(context, attrs) {
     private var bitmap: Bitmap? = null
     private val points = mutableListOf<Pair<Float, Float>>()
+    private var candidateRegions: List<FloatArray> = emptyList()
     private val imageMatrix = Matrix()
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val candidatePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.RED
+        strokeWidth = 2f * resources.displayMetrics.density
+        style = Paint.Style.STROKE
+    }
     private val markerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(20, 110, 230)
         strokeWidth = 3f * resources.displayMetrics.density
@@ -37,7 +43,13 @@ class QuadSelectionView @JvmOverloads constructor(
     fun setBitmap(value: Bitmap?) {
         bitmap = value
         points.clear()
+        candidateRegions = emptyList()
         updateTransform()
+        invalidate()
+    }
+
+    fun setCandidateRegions(candidates: List<FloatArray>) {
+        candidateRegions = candidates.filter { it.size == 8 }.map { it.copyOf() }
         invalidate()
     }
 
@@ -68,6 +80,18 @@ class QuadSelectionView @JvmOverloads constructor(
         super.onDraw(canvas)
         val image = bitmap ?: return
         canvas.drawBitmap(image, imageMatrix, bitmapPaint)
+        candidateRegions.forEach { corners ->
+            for (index in 0 until 4) {
+                val next = (index + 1) % 4
+                canvas.drawLine(
+                    offsetX + corners[index * 2] * scale,
+                    offsetY + corners[index * 2 + 1] * scale,
+                    offsetX + corners[next * 2] * scale,
+                    offsetY + corners[next * 2 + 1] * scale,
+                    candidatePaint
+                )
+            }
+        }
         val radius = 10f * resources.displayMetrics.density
         points.forEachIndexed { index, point ->
             val x = offsetX + point.first * scale
@@ -117,6 +141,19 @@ class QuadSelectionView @JvmOverloads constructor(
                     -1
                 }
                 if (movingIndex < 0) {
+                    val imageX = (event.x - offsetX) / scale
+                    val imageY = (event.y - offsetY) / scale
+                    val candidate = candidateRegions.firstOrNull {
+                        containsPoint(it, imageX, imageY)
+                    }
+                    if (candidate != null) {
+                        points.clear()
+                        for (index in 0 until 4) {
+                            points.add(candidate[index * 2] to candidate[index * 2 + 1])
+                        }
+                        invalidate()
+                        return true
+                    }
                     if (points.size == 4) points.clear()
                     points.add(0f to 0f)
                     movingIndex = points.lastIndex
@@ -143,6 +180,22 @@ class QuadSelectionView @JvmOverloads constructor(
         val y = ((event.y - offsetY) / scale).coerceIn(0f, image.height.toFloat())
         points[movingIndex] = x to y
         invalidate()
+    }
+
+    private fun containsPoint(corners: FloatArray, x: Float, y: Float): Boolean {
+        var inside = false
+        var previous = 3
+        for (index in 0 until 4) {
+            val x1 = corners[index * 2]
+            val y1 = corners[index * 2 + 1]
+            val x2 = corners[previous * 2]
+            val y2 = corners[previous * 2 + 1]
+            if ((y1 > y) != (y2 > y) && x < (x2 - x1) * (y - y1) / (y2 - y1) + x1) {
+                inside = !inside
+            }
+            previous = index
+        }
+        return inside
     }
 
     override fun performClick(): Boolean {

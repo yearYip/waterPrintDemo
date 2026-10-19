@@ -21,6 +21,12 @@ import kotlin.math.sin
  */
 object FrequencyWatermark {
     class CarrierException(message: String) : IllegalArgumentException(message)
+    enum class FailureReason {
+        INVALID_GEOMETRY,
+        INSUFFICIENT_BLOCKS,
+        WEAK_SIGNAL,
+        INVALID_PAYLOAD
+    }
     const val MAX_PAYLOAD_BITS = 512
     private const val SIZE = 512
     private const val BLOCK = 8
@@ -155,6 +161,8 @@ object FrequencyWatermark {
 
     class Reader(bitmap: Bitmap) {
         private val source: Plane
+        var bestFailure: FailureReason? = null
+            private set
         init {
             val values = FloatArray(bitmap.width * bitmap.height)
             val row = IntArray(bitmap.width)
@@ -171,16 +179,28 @@ object FrequencyWatermark {
         }
 
         fun extract(corners: FloatArray? = null, refine: Boolean = true): WatermarkPayload? =
-            extractPlane(source, corners ?: fullCorners(source.width, source.height), refine)
+            extractPlane(source, corners ?: fullCorners(source.width, source.height), refine) { reason ->
+                if (bestFailure == null || reason.ordinal > bestFailure!!.ordinal) {
+                    bestFailure = reason
+                }
+            }
 
         fun alignmentScore(corners: FloatArray): Double = pilotScore(source, corners)
 
     }
 
-    private fun extractPlane(source: Plane, corners: FloatArray, refine: Boolean): WatermarkPayload? {
-        if (mapping(corners) == null) return null
+    private fun extractPlane(
+        source: Plane,
+        corners: FloatArray,
+        refine: Boolean,
+        onFailure: (FailureReason) -> Unit
+    ): WatermarkPayload? {
+        if (mapping(corners) == null) {
+            onFailure(FailureReason.INVALID_GEOMETRY)
+            return null
+        }
         var best = corners.copyOf()
-        decode(source, best)?.let { return it }
+        decode(source, best, onFailure)?.let { return it }
         if (!refine) return null
 
         var bestScore = pilotScore(source, best)
@@ -209,13 +229,20 @@ object FrequencyWatermark {
                     }
                 }
             }
-            if (bestScore > 0.25) decode(source, best)?.let { return it }
+            if (bestScore > 0.25) decode(source, best, onFailure)?.let { return it }
         }
         return null
     }
 
-    private fun decode(source: Plane, corners: FloatArray): WatermarkPayload? {
-        val plane = normalize(source, corners) ?: return null
+    private fun decode(
+        source: Plane,
+        corners: FloatArray,
+        onFailure: (FailureReason) -> Unit
+    ): WatermarkPayload? {
+        val plane = normalize(source, corners) ?: run {
+            onFailure(FailureReason.INVALID_GEOMETRY)
+            return null
+        }
         val coefficients = DoubleArray(BLOCKS)
         val eligible = BooleanArray(BLOCKS)
         for (logical in 0 until BLOCKS) {
@@ -226,7 +253,10 @@ object FrequencyWatermark {
             eligible[logical] = true
         }
         val pilotCount = (0 until PILOTS).count { eligible[it] }
-        if (pilotCount < 64) return null
+        if (pilotCount < 64) {
+            onFailure(FailureReason.INSUFFICIENT_BLOCKS)
+            return null
+        }
         // Resampling attenuates AC coefficients. Estimate that gain from known pilots.
         val gains = extractionGains.map { gain ->
             var sum = 0.0
@@ -237,8 +267,10 @@ object FrequencyWatermark {
             }
             gain to sum / pilotCount
         }.sortedByDescending { it.second }
+        var triedPayload = false
         for ((gain, score) in gains.take(3)) {
             if (score < 0.22) continue
+            triedPayload = true
             val votes = DoubleArray(CODE_BITS)
             for (i in PILOTS until BLOCKS) {
                 if (eligible[i]) votes[(i - PILOTS) % CODE_BITS] +=
@@ -246,6 +278,7 @@ object FrequencyWatermark {
             }
             WatermarkPayload.fromBitArray(viterbi(votes))?.let { return it }
         }
+        onFailure(if (triedPayload) FailureReason.INVALID_PAYLOAD else FailureReason.WEAK_SIGNAL)
         return null
     }
 

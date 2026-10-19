@@ -10,13 +10,6 @@
         android:padding="16dp">
 
         <Button
-            android:id="@+id/btn_back_main"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:text="返回主页" />
-
-        <Button
             android:id="@+id/btn_select_img"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -29,6 +22,13 @@
             android:layout_height="wrap_content"
             android:layout_gravity="center_horizontal"
             android:text="选择录屏视频" />
+
+        <Button
+            android:id="@+id/btn_back_main"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:text="返回主页" />
 
         <TextView
             android:id="@+id/tv_result"
@@ -56,7 +56,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:text="按左上、右上、右下、左下顺序点选整张水印图片，或保留下来的一个完整水印区域的四角；可拖动蓝点调整。"
+            android:text="蓝框可包含一个或多个完整水印区域，程序会在框内寻找候选角点。红框仅表示候选区域；点击红框可选取四角，也可手动点选四角并拖动蓝点调整。"
             android:visibility="gone" />
 
         <com.demo.watermarktracedemo.QuadSelectionView

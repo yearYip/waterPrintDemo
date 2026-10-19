@@ -2,6 +2,7 @@ package com.demo.watermarktracedemo
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Rect
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
@@ -17,6 +18,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.roundToInt
 import java.util.Locale
 
@@ -94,14 +97,16 @@ class TraceActivity : AppCompatActivity() {
                     if (decoded.payload != null) {
                         bitmap.recycle()
                         showPayload(decoded.payload, startedAt)
-                    } else if (decoded.noCompleteRegion) {
-                        bitmap.recycle()
-                        tvResult.text = noRegionMessage(startedAt)
                     } else {
-                        showAlignment(bitmap, "自动解析未成功（用时 ${elapsedText(startedAt)}）。请选取一个完整水印区域的四角。")
+                        val message = if (decoded.noCompleteRegion) {
+                            "自动定位失败：未找到候选水印区域（用时 ${elapsedText(startedAt)}）。请手动选取完整区域的四角。"
+                        } else {
+                            "已找到候选区域，但未能解析出有效水印（用时 ${elapsedText(startedAt)}）。${diagnosticText(decoded.pngFailure, decoded.frequencyFailure)}点击红框选取四角，可拖动蓝点调整。"
+                        }
+                        showAlignment(bitmap, message, decoded.candidateRegions)
                     }
                 },
-                onFailure = { tvResult.text = "解析失败（用时 ${elapsedText(startedAt)}）：${it.message ?: "未知错误"}" }
+                onFailure = { tvResult.text = "图片读取或处理出错（用时 ${elapsedText(startedAt)}）：${it.message ?: "未知错误"}" }
             )
         }
     }
@@ -119,28 +124,41 @@ class TraceActivity : AppCompatActivity() {
                         val times = sampleTimes(retriever)
                         val durationMs = videoDuration(retriever)
                         var preview: Bitmap? = null
+                        var previewCandidates: List<FloatArray> = emptyList()
+                        var previewTimeMs = 0L
                         var foundRegion = false
+                        var frequencyFailure: FrequencyWatermark.FailureReason? = null
+                        var pngFailure: PngFailure? = null
                         for ((index, timeMs) in times.withIndex()) {
                             showProgress("正在抽取录屏画面 ${index + 1}/${times.size}…")
                             val frame = retriever.getFrameAtTime(
                                 timeMs * 1000,
                                 MediaMetadataRetriever.OPTION_CLOSEST_SYNC
                             ) ?: continue
-                            if (preview == null || index == times.size / 2) {
-                                preview?.recycle()
-                                preview = frame
-                            }
                             val decoded = decodeAutomatic(frame, ::showProgress)
                             if (!decoded.noCompleteRegion) foundRegion = true
+                            frequencyFailure = strongerFailure(frequencyFailure, decoded.frequencyFailure)
+                            pngFailure = strongerPngFailure(pngFailure, decoded.pngFailure)
                             if (decoded.payload != null) {
-                                if (frame !== preview) frame.recycle()
+                                frame.recycle()
                                 preview?.recycle()
                                 return@withRetriever VideoScanResult(decoded.payload, null, durationMs, false)
                             }
-                            if (frame !== preview) frame.recycle()
+                            val keepAsPreview = preview == null ||
+                                (decoded.candidateRegions.isNotEmpty() && previewCandidates.isEmpty()) ||
+                                (index == times.size / 2 && previewCandidates.isEmpty())
+                            if (keepAsPreview) {
+                                preview?.recycle()
+                                preview = frame
+                                previewCandidates = decoded.candidateRegions
+                                previewTimeMs = timeMs
+                            } else {
+                                frame.recycle()
+                            }
                         }
                         VideoScanResult(
-                            null, preview ?: error("无法抽取视频画面"), durationMs, !foundRegion
+                            null, preview ?: error("无法抽取视频画面"), durationMs, !foundRegion,
+                            previewCandidates, previewTimeMs, frequencyFailure, pngFailure
                         )
                     }
                 }
@@ -149,18 +167,24 @@ class TraceActivity : AppCompatActivity() {
                 onSuccess = { scan ->
                     videoDurationMs = scan.durationMs
                     if (scan.payload != null) showPayload(scan.payload, startedAt)
-                    else if (scan.noCompleteRegion) {
-                        scan.frame?.recycle()
-                        tvResult.text = noRegionMessage(startedAt)
-                    } else {
-                        videoSeek.progress = 500
+                    else {
+                        videoSeek.progress = if (scan.durationMs > 0L) {
+                            (scan.previewTimeMs.toDouble() / scan.durationMs * 1000)
+                                .roundToInt().coerceIn(0, 1000)
+                        } else 0
+                        val message = if (scan.noCompleteRegion) {
+                            "自动定位失败：抽样帧中未找到候选水印区域（用时 ${elapsedText(startedAt)}）。可拖动视频位置，再手动选取完整区域的四角。"
+                        } else {
+                            "抽样帧中已找到候选区域，但未能解析出有效水印（用时 ${elapsedText(startedAt)}）。${diagnosticText(scan.pngFailure, scan.frequencyFailure)}点击红框选取四角，可拖动蓝点调整。"
+                        }
                         showAlignment(
                             scan.frame!!,
-                            "未在抽样帧中自动识别（用时 ${elapsedText(startedAt)}）。可拖动视频位置，再选取完整区域的四角。"
+                            message,
+                            scan.candidateRegions
                         )
                     }
                 },
-                onFailure = { tvResult.text = "解析失败（用时 ${elapsedText(startedAt)}）：${it.message ?: "未知错误"}" }
+                onFailure = { tvResult.text = "视频读取或处理出错（用时 ${elapsedText(startedAt)}）：${it.message ?: "未知错误"}" }
             )
         }
     }
@@ -204,9 +228,12 @@ class TraceActivity : AppCompatActivity() {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val first = decodeAligned(preview, corners, ::showProgress)
-                    if (first.payload != null || first.noCompleteRegion) return@runCatching first
+                    if (first.payload != null) return@runCatching first
                     val uri = videoUri ?: return@runCatching first
                     withRetriever(uri) { retriever ->
+                        var foundCandidate = !first.noCompleteRegion
+                        var frequencyFailure = first.frequencyFailure
+                        var pngFailure = first.pngFailure
                         for (timeMs in sampleTimes(retriever)) {
                             val frame = retriever.getFrameAtTime(
                                 timeMs * 1000,
@@ -217,21 +244,30 @@ class TraceActivity : AppCompatActivity() {
                             } finally {
                                 frame.recycle()
                             }
-                            if (decoded.payload != null || decoded.noCompleteRegion) {
-                                return@withRetriever decoded
-                            }
+                            if (decoded.payload != null) return@withRetriever decoded
+                            if (!decoded.noCompleteRegion) foundCandidate = true
+                            frequencyFailure = strongerFailure(frequencyFailure, decoded.frequencyFailure)
+                            pngFailure = strongerPngFailure(pngFailure, decoded.pngFailure)
                         }
-                        DecodeResult()
+                        DecodeResult(
+                            noCompleteRegion = !foundCandidate,
+                            frequencyFailure = frequencyFailure,
+                            pngFailure = pngFailure
+                        )
                     }
                 }
             }
             result.fold(
                 onSuccess = { decoded ->
                     if (decoded.payload != null) showPayload(decoded.payload, startedAt)
-                    else if (decoded.noCompleteRegion) tvResult.text = noRegionMessage(startedAt)
-                    else tvResult.text = "未能通过水印校验（用时 ${elapsedText(startedAt)}）。请框选一个完整区域，避免包含按钮或界面留白。"
+                    else if (decoded.noCompleteRegion) {
+                        tvResult.text = "蓝框内未找到候选水印区域，也未能直接读取水印（用时 ${elapsedText(startedAt)}）。${diagnosticText(decoded.pngFailure, decoded.frequencyFailure)}请扩大蓝框，确保包含一个完整区域。"
+                    } else {
+                        if (videoUri == null) selection.setCandidateRegions(decoded.candidateRegions)
+                        tvResult.text = "蓝框内已找到候选区域，但未能解析出有效水印（用时 ${elapsedText(startedAt)}）。${diagnosticText(decoded.pngFailure, decoded.frequencyFailure)}请调整四角，或尝试其他完整区域。"
+                    }
                 },
-                onFailure = { tvResult.text = "校正失败（用时 ${elapsedText(startedAt)}）：${it.message ?: "未知错误"}" }
+                onFailure = { tvResult.text = "选中区域处理出错（用时 ${elapsedText(startedAt)}）：${it.message ?: "未知错误"}" }
             )
         }
     }
@@ -266,28 +302,145 @@ class TraceActivity : AppCompatActivity() {
         onProgress: (String) -> Unit,
         manualCorners: FloatArray? = null
     ): DecodeResult {
-        onProgress("正在寻找水印角点…")
-        var earlyPayload: WatermarkPayload? = null
-        val candidates = CornerLocator.candidates(bitmap) { corners ->
-            onProgress("已找到候选区域，正在校验水印…")
-            earlyPayload = decodeExactPngRegion(bitmap, corners)
-                ?: reader.extract(corners, refine = false)
-            earlyPayload != null
-        }
-        earlyPayload?.let { return DecodeResult(it) }
-        if (candidates.isEmpty()) return DecodeResult(noCompleteRegion = true)
-        onProgress("正在校正候选区域…")
         if (manualCorners != null) {
+            onProgress("正在校正选中区域…")
             reader.extract(manualCorners)?.let { return DecodeResult(it) }
         }
+        val bounds = if (manualCorners != null) {
+            selectedBounds(bitmap, manualCorners) ?: return DecodeResult(
+                noCompleteRegion = true,
+                frequencyFailure = FrequencyWatermark.FailureReason.INVALID_GEOMETRY
+            )
+        } else {
+            Rect(0, 0, bitmap.width, bitmap.height)
+        }
+        onProgress(if (manualCorners == null) "正在寻找水印角点…" else "正在蓝框内寻找水印角点…")
+        var earlyPayload: WatermarkPayload? = null
+        var pngFailure: PngFailure? = null
+        fun tryPng(corners: FloatArray): WatermarkPayload? {
+            val result = readExactPngRegion(bitmap, corners)
+            pngFailure = strongerPngFailure(pngFailure, result.failure)
+            return result.payload
+        }
+        val searchBitmap = if (manualCorners == null) bitmap else Bitmap.createBitmap(
+            bitmap, bounds.left, bounds.top, bounds.width(), bounds.height()
+        )
+        fun toSourceCorners(localCorners: FloatArray): FloatArray = FloatArray(localCorners.size) { index ->
+            localCorners[index] + (if (index % 2 == 0) bounds.left else bounds.top).toFloat()
+        }
+        val candidates = try {
+            CornerLocator.candidates(searchBitmap) { localCorners ->
+                val corners = toSourceCorners(localCorners)
+                if (manualCorners != null && !candidateCenterInside(corners, manualCorners)) {
+                    false
+                } else {
+                    onProgress("已找到候选区域，正在校验水印…")
+                    earlyPayload = tryPng(corners)
+                        ?: reader.extract(corners, refine = false)
+                    earlyPayload != null
+                }
+            }.map(::toSourceCorners).filter { corners ->
+                manualCorners == null || candidateCenterInside(corners, manualCorners)
+            }
+        } finally {
+            if (searchBitmap !== bitmap) searchBitmap.recycle()
+        }
+        earlyPayload?.let { return DecodeResult(it) }
+        if (candidates.isEmpty()) return DecodeResult(
+            noCompleteRegion = true,
+            frequencyFailure = reader.bestFailure,
+            pngFailure = pngFailure
+        )
+        onProgress("正在校正候选区域…")
         for (corners in candidates) {
-            decodeExactPngRegion(bitmap, corners)?.let { return DecodeResult(it) }
+            tryPng(corners)?.let { return DecodeResult(it) }
             reader.extract(corners, refine = false)?.let { return DecodeResult(it) }
         }
-        for (corners in candidates.take(4)) {
+        val refinedCandidates = if (manualCorners == null) candidates.take(4) else candidates
+        for ((index, corners) in refinedCandidates.withIndex()) {
+            onProgress("正在校正候选区域 ${index + 1}/${refinedCandidates.size}…")
             reader.extract(corners)?.let { return DecodeResult(it) }
         }
-        return DecodeResult()
+        return DecodeResult(
+            candidateRegions = candidates,
+            frequencyFailure = reader.bestFailure,
+            pngFailure = pngFailure
+        )
+    }
+
+    private fun selectedBounds(bitmap: Bitmap, corners: FloatArray): Rect? {
+        if (corners.size != 8 || corners.any { !it.isFinite() }) return null
+        val left = floor(minOf(corners[0], corners[2], corners[4], corners[6]).toDouble())
+            .toInt().coerceIn(0, bitmap.width - 1)
+        val top = floor(minOf(corners[1], corners[3], corners[5], corners[7]).toDouble())
+            .toInt().coerceIn(0, bitmap.height - 1)
+        val right = ceil(maxOf(corners[0], corners[2], corners[4], corners[6]).toDouble())
+            .toInt().coerceIn(left + 1, bitmap.width)
+        val bottom = ceil(maxOf(corners[1], corners[3], corners[5], corners[7]).toDouble())
+            .toInt().coerceIn(top + 1, bitmap.height)
+        return Rect(left, top, right, bottom).takeIf { it.width() >= 32 && it.height() >= 32 }
+    }
+
+    private fun candidateCenterInside(candidate: FloatArray, selection: FloatArray): Boolean {
+        val x = (candidate[0] + candidate[2] + candidate[4] + candidate[6]) / 4f
+        val y = (candidate[1] + candidate[3] + candidate[5] + candidate[7]) / 4f
+        var inside = false
+        var previous = 3
+        for (index in 0 until 4) {
+            val x1 = selection[index * 2]
+            val y1 = selection[index * 2 + 1]
+            val x2 = selection[previous * 2]
+            val y2 = selection[previous * 2 + 1]
+            if ((y1 > y) != (y2 > y) && x < (x2 - x1) * (y - y1) / (y2 - y1) + x1) {
+                inside = !inside
+            }
+            previous = index
+        }
+        return inside
+    }
+
+    private fun strongerFailure(
+        first: FrequencyWatermark.FailureReason?,
+        second: FrequencyWatermark.FailureReason?
+    ): FrequencyWatermark.FailureReason? = when {
+        first == null -> second
+        second == null || first.ordinal >= second.ordinal -> first
+        else -> second
+    }
+
+    private fun strongerPngFailure(first: PngFailure?, second: PngFailure?): PngFailure? = when {
+        first == null -> second
+        second == null || first.ordinal >= second.ordinal -> first
+        else -> second
+    }
+
+    private fun diagnosticText(
+        pngFailure: PngFailure?,
+        frequencyFailure: FrequencyWatermark.FailureReason?
+    ): String {
+        val lines = listOf(pngFailureText(pngFailure), frequencyFailureText(frequencyFailure))
+            .filter { it.isNotEmpty() }
+        return if (lines.isEmpty()) "" else lines.joinToString("\n", prefix = "\n", postfix = "\n")
+    }
+
+    private fun pngFailureText(reason: PngFailure?): String = when (reason) {
+        PngFailure.INVALID_BOUNDS -> "原始 PNG 读取：选中区域边界无效。"
+        PngFailure.HEADER_NOT_FOUND -> "原始 PNG 读取：未找到有效数据头。"
+        PngFailure.DATA_INCOMPLETE -> "原始 PNG 读取：数据长度超出选中区域。"
+        PngFailure.INVALID_PAYLOAD -> "原始 PNG 读取：数据格式或 CRC 校验未通过。"
+        null -> ""
+    }
+
+    private fun frequencyFailureText(reason: FrequencyWatermark.FailureReason?): String = when (reason) {
+        FrequencyWatermark.FailureReason.INVALID_GEOMETRY ->
+            "频域诊断：四角无法建立有效校正坐标，或区域边长小于 96 像素。"
+        FrequencyWatermark.FailureReason.INSUFFICIENT_BLOCKS ->
+            "频域诊断：可用的导频采样块不足 64 个。"
+        FrequencyWatermark.FailureReason.WEAK_SIGNAL ->
+            "频域诊断：导频信号未达到解码阈值。"
+        FrequencyWatermark.FailureReason.INVALID_PAYLOAD ->
+            "频域诊断：已尝试恢复数据，但水印格式或 CRC 校验未通过。"
+        null -> ""
     }
 
     private fun loadBitmap(uri: Uri): Bitmap {
@@ -313,24 +466,38 @@ class TraceActivity : AppCompatActivity() {
         onProgress: (String) -> Unit
     ): DecodeResult {
         onProgress("正在校正并验证选中区域…")
-        decodeExactPngRegion(source, corners)?.let { return DecodeResult(it) }
+        val png = readExactPngRegion(source, corners)
+        png.payload?.let { return DecodeResult(it) }
         val reader = FrequencyWatermark.Reader(source)
-        return decodeLocated(source, reader, onProgress, corners)
+        val decoded = decodeLocated(source, reader, onProgress, corners)
+        return decoded.copy(pngFailure = strongerPngFailure(png.failure, decoded.pngFailure))
     }
 
-    private fun decodeExactPngRegion(source: Bitmap, corners: FloatArray): WatermarkPayload? {
-        if (corners.size != 8) return null
+    private fun decodeExactPngRegion(source: Bitmap, corners: FloatArray): WatermarkPayload? =
+        readExactPngRegion(source, corners).payload
+
+    private fun readExactPngRegion(source: Bitmap, corners: FloatArray): PngReadResult {
+        if (corners.size != 8 || corners.any { !it.isFinite() }) {
+            return PngReadResult(failure = PngFailure.INVALID_BOUNDS)
+        }
         val left = corners[0].roundToInt().coerceIn(0, source.width - 1)
         val top = corners[1].roundToInt().coerceIn(0, source.height - 1)
         val right = corners[4].roundToInt().coerceIn(left + 1, source.width)
         val bottom = corners[5].roundToInt().coerceIn(top + 1, source.height)
-        if (right - left < 48 || bottom - top < 1) return null
+        if (right - left < 48 || bottom - top < 1) {
+            return PngReadResult(failure = PngFailure.INVALID_BOUNDS)
+        }
         val crop = Bitmap.createBitmap(source, left, top, right - left, bottom - top)
         return try {
             val header = HalfToneWatermark.extract(crop, WatermarkPayload.HEADER_BITS)
-            val count = WatermarkPayload.requiredBitCount(header) ?: return null
-            if (count > crop.width.toLong() * crop.height) return null
-            WatermarkPayload.fromBitArray(HalfToneWatermark.extract(crop, count))
+            val count = WatermarkPayload.requiredBitCount(header)
+                ?: return PngReadResult(failure = PngFailure.HEADER_NOT_FOUND)
+            if (count > crop.width.toLong() * crop.height) {
+                return PngReadResult(failure = PngFailure.DATA_INCOMPLETE)
+            }
+            val payload = WatermarkPayload.fromBitArray(HalfToneWatermark.extract(crop, count))
+            if (payload != null) PngReadResult(payload)
+            else PngReadResult(failure = PngFailure.INVALID_PAYLOAD)
         } finally {
             if (crop !== source) crop.recycle()
         }
@@ -358,9 +525,14 @@ class TraceActivity : AppCompatActivity() {
             MediaMetadataRetriever.METADATA_KEY_DURATION
         )?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
 
-    private fun showAlignment(bitmap: Bitmap, message: String) {
+    private fun showAlignment(
+        bitmap: Bitmap,
+        message: String,
+        candidateRegions: List<FloatArray> = emptyList()
+    ) {
         previewBitmap = bitmap
         selection.setBitmap(bitmap)
+        selection.setCandidateRegions(candidateRegions)
         alignmentHint.visibility = View.VISIBLE
         selection.visibility = View.VISIBLE
         decodeRegionButton.visibility = View.VISIBLE
@@ -392,9 +564,6 @@ class TraceActivity : AppCompatActivity() {
             "水印解析成功（用时 ${elapsedText(startedAt)}）\n用户 ID: ${payload.userId}\n设备 ID: ${payload.deviceId}\n时间戳: ${payload.timestamp}"
     }
 
-    private fun noRegionMessage(startedAt: Long): String =
-        "未找到包含四个角点的完整水印区域，已停止解析（用时 ${elapsedText(startedAt)}）。请选择保留完整区域的局部图片。"
-
     private fun elapsedText(startedAt: Long): String = String.format(
         Locale.getDefault(), "%.1f 秒", (SystemClock.elapsedRealtime() - startedAt) / 1000.0
     )
@@ -407,11 +576,30 @@ class TraceActivity : AppCompatActivity() {
         val payload: WatermarkPayload?,
         val frame: Bitmap?,
         val durationMs: Long,
-        val noCompleteRegion: Boolean
+        val noCompleteRegion: Boolean,
+        val candidateRegions: List<FloatArray> = emptyList(),
+        val previewTimeMs: Long = 0L,
+        val frequencyFailure: FrequencyWatermark.FailureReason? = null,
+        val pngFailure: PngFailure? = null
     )
 
     private data class DecodeResult(
         val payload: WatermarkPayload? = null,
-        val noCompleteRegion: Boolean = false
+        val noCompleteRegion: Boolean = false,
+        val candidateRegions: List<FloatArray> = emptyList(),
+        val frequencyFailure: FrequencyWatermark.FailureReason? = null,
+        val pngFailure: PngFailure? = null
+    )
+
+    private enum class PngFailure {
+        INVALID_BOUNDS,
+        HEADER_NOT_FOUND,
+        DATA_INCOMPLETE,
+        INVALID_PAYLOAD
+    }
+
+    private data class PngReadResult(
+        val payload: WatermarkPayload? = null,
+        val failure: PngFailure? = null
     )
 }
