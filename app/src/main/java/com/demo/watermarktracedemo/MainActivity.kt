@@ -119,7 +119,20 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         "水印已生成：请使用保存的 PNG 原图解析。当前图片未通过截图提取校验。"
                     }
-                    val timedSummary = "生成用时 ${elapsedText(startedAt)}。$summary"
+                    val compressionSummary = generated.compressionChecks.joinToString("\n") { check ->
+                        if (check.error != null) {
+                            "模拟 WebP 质量 ${check.quality}：检查未完成（${check.error}）。"
+                        } else {
+                            val score = String.format(Locale.ROOT, "%.3f", check.bestPilotScore)
+                            "模拟 WebP 质量 ${check.quality}（${check.width}×${check.height}）：" +
+                                "已知区域回读 ${check.readableRegions}/${check.totalRegions}；" +
+                                "最高导频分数 $score（可用导频最多 ${check.maxReadablePilots}/512）；" +
+                                "定位${if (check.candidateFound) "有候选" else "未找到候选"}；" +
+                                "自动回读${if (check.automaticReadable) "通过" else "失败"}。"
+                        }
+                    }
+                    val timedSummary = "生成及校验用时 ${elapsedText(startedAt)}。$summary\n" +
+                        compressionSummary + "\n模拟结果仅适用于本次压缩参数，实际软件传输后请再次测试。"
                     status.text = timedSummary
                     saveImageToGallery(generated.bitmap, timedSummary)
                 }.onFailure {

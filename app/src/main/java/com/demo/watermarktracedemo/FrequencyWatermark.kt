@@ -79,7 +79,11 @@ object FrequencyWatermark {
             if (statistics.mean < 12 || statistics.mean > 254 ||
                 (smooth && statistics.mean < 96)
             ) continue
-            if (smooth) blockLimits[block] = 1f
+            blockLimits[block] = when {
+                smooth -> 1f
+                logical < PILOTS -> 3f
+                else -> 2f
+            }
             val bit = if (logical < PILOTS) pilotBits[logical] else code[logical - PILOTS]
             val coefficient = coefficient(normalized, block)
             val center = if (bit) PERIOD * 0.75 else PERIOD * 0.25
@@ -118,7 +122,7 @@ object FrequencyWatermark {
                     val blockY = ((y + 0.5f) * GRID / source.height).toInt().coerceIn(0, GRID - 1)
                     val block = blockY * GRID + blockX
                     if (targets[block].isNaN()) continue
-                    val limit = min(if (luma < 48f) 1f else 2f, blockLimits[block])
+                    val limit = if (luma < 48f) 1f else blockLimits[block]
                     val delta = correctionPlane.sample(
                         (x + 0.5f) * SIZE / source.width - 0.5f,
                         (y + 0.5f) * SIZE / source.height - 0.5f
@@ -161,6 +165,8 @@ object FrequencyWatermark {
     fun extract(bitmap: Bitmap, corners: FloatArray? = null, refine: Boolean = true): WatermarkPayload? =
         Reader(bitmap).extract(corners, refine)
 
+    data class PilotDiagnostics(val score: Double, val readableBlocks: Int)
+
     class Reader(bitmap: Bitmap) {
         private val source: Plane
         var bestFailure: FailureReason? = null
@@ -188,6 +194,24 @@ object FrequencyWatermark {
             }
 
         fun alignmentScore(corners: FloatArray): Double = pilotScore(source, corners)
+
+        /** All 512 pilots, using the same eligibility and gain search as the decoder. */
+        fun pilotDiagnostics(corners: FloatArray): PilotDiagnostics {
+            val plane = normalize(source, corners) ?: return PilotDiagnostics(0.0, 0)
+            val coefficients = DoubleArray(PILOTS)
+            val eligible = BooleanArray(PILOTS)
+            for (logical in 0 until PILOTS) {
+                val block = order[logical]
+                val statistics = stats(plane, block)
+                if (!readable(statistics.mean, statistics.textureVariance)) continue
+                coefficients[logical] = coefficient(plane, block)
+                eligible[logical] = true
+            }
+            return PilotDiagnostics(
+                rankedGains(coefficients, eligible, alignmentGains).first().second,
+                eligible.count { it }
+            )
+        }
 
     }
 
@@ -263,15 +287,6 @@ object FrequencyWatermark {
         }
         // Keep the usual decode path first. Compression can attenuate coefficients beyond
         // its gain range, so retry only after it fails; CRC rejects spurious decodes.
-        fun rankedGains(values: DoubleArray) = values.map { gain ->
-            var sum = 0.0
-            for (i in 0 until PILOTS) {
-                if (!eligible[i]) continue
-                val soft = sin(2 * PI * coefficients[i] * gain / PERIOD)
-                sum += if (pilotBits[i]) -soft else soft
-            }
-            gain to sum / pilotCount
-        }.sortedByDescending { it.second }
         fun decodeAt(gain: Double): WatermarkPayload? {
             val votes = DoubleArray(BLOCKS - PILOTS)
             for (i in PILOTS until BLOCKS) {
@@ -281,17 +296,32 @@ object FrequencyWatermark {
             return FrequencyPayloadCodec.decode(votes)
         }
         var reliableSignal = false
-        for ((gain, score) in rankedGains(extractionGains).take(3)) {
+        for ((gain, score) in rankedGains(coefficients, eligible, extractionGains).take(3)) {
             if (score < 0.22) continue
             reliableSignal = true
             decodeAt(gain)?.let { return it }
         }
-        for ((gain, score) in rankedGains(recoveryGains).take(3)) {
+        for ((gain, score) in rankedGains(coefficients, eligible, recoveryGains).take(3)) {
             if (score < 0.08) continue
             decodeAt(gain)?.let { return it }
         }
         onFailure(if (reliableSignal) FailureReason.INVALID_PAYLOAD else FailureReason.WEAK_SIGNAL)
         return null
+    }
+
+    private fun rankedGains(
+        coefficients: DoubleArray, eligible: BooleanArray, gains: DoubleArray
+    ): List<Pair<Double, Double>> {
+        val count = (0 until PILOTS).count { eligible[it] }
+        return gains.map { gain ->
+            var sum = 0.0
+            for (i in 0 until PILOTS) {
+                if (!eligible[i]) continue
+                val soft = sin(2 * PI * coefficients[i] * gain / PERIOD)
+                sum += if (pilotBits[i]) -soft else soft
+            }
+            gain to if (count == 0) 0.0 else sum / count
+        }.sortedByDescending { it.second }
     }
 
     private fun pilotScore(source: Plane, corners: FloatArray): Double {

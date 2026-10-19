@@ -12,8 +12,8 @@ android {
         applicationId = "com.demo.watermarktracedemo"
         minSdk = 24
         targetSdk = 37
-        versionCode = 9
-        versionName = "5.1.1"
+        versionCode = 10
+        versionName = "5.1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

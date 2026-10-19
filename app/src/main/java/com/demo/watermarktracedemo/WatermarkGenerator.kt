@@ -8,16 +8,23 @@ object WatermarkGenerator {
         val bitmap: Bitmap,
         val screenshotVerified: Boolean,
         val regions: Int = 1,
-        val screenshotRegions: Int = 0
+        val screenshotRegions: Int = 0,
+        val compressionChecks: List<WatermarkCompressionCheck.Result> = emptyList()
     )
 
     fun generate(source: Bitmap, bits: BooleanArray, onProgress: (String) -> Unit = {}): Result {
-        require(WatermarkPayload.fromBitArray(bits) != null) { "水印数据无效" }
+        val expected = WatermarkPayload.fromBitArray(bits) ?: error("水印数据无效")
         require(bits.size <= FrequencyWatermark.MAX_PAYLOAD_BITS) { "用户 ID 过长" }
         val result = MultiRegionWatermark.embed(source, bits, onProgress)
-        return Result(
-            result.bitmap, result.screenshotRegions > 0,
-            result.regions, result.screenshotRegions
-        )
+        try {
+            val checks = WatermarkCompressionCheck.verify(result.bitmap, expected, onProgress)
+            return Result(
+                result.bitmap, result.screenshotRegions > 0,
+                result.regions, result.screenshotRegions, checks
+            )
+        } catch (e: Exception) {
+            result.bitmap.recycle()
+            throw e
+        }
     }
 }
