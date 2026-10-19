@@ -14,9 +14,11 @@ import kotlin.math.sqrt
  */
 object CornerLocator {
     private const val CELLS = 8
-    private const val MAX_SEARCH_EDGE = 800
+    const val FAST_SEARCH_EDGE = 800
+    const val RETRY_SEARCH_EDGE = 1200
     private const val MAX_PEAKS_PER_CORNER = 40
     private const val MIN_SCORE = 0.43
+    private const val CHROMA_STRENGTH = 8
     private val patterns = Array(4) { kind ->
         IntArray(CELLS * CELLS) { if (it < CELLS * CELLS / 2) 1 else -1 }.also { signs ->
             val random = java.util.Random(0x434f524e45524cL + kind)
@@ -50,9 +52,9 @@ object CornerLocator {
                 val pixel = pixels[index]
                 pixels[index] = Color.argb(
                     Color.alpha(pixel),
-                    (Color.red(pixel) + sign * 6).coerceIn(0, 255),
+                    (Color.red(pixel) + sign * CHROMA_STRENGTH).coerceIn(0, 255),
                     (Color.green(pixel) - sign * 2).coerceIn(0, 255),
-                    (Color.blue(pixel) - sign * 6).coerceIn(0, 255)
+                    (Color.blue(pixel) - sign * CHROMA_STRENGTH).coerceIn(0, 255)
                 )
             }
         }
@@ -63,8 +65,12 @@ object CornerLocator {
      * Searches a bounded set of pilot sizes and image positions, independent of saved thumbnails.
      * A callback may stop the search as soon as a real watermark passes CRC verification.
      */
-    fun candidates(bitmap: Bitmap, onEarlyCandidate: (FloatArray) -> Boolean = { false }): List<FloatArray> {
-        val scale = min(1f, MAX_SEARCH_EDGE.toFloat() / max(bitmap.width, bitmap.height))
+    fun candidates(
+        bitmap: Bitmap,
+        maxSearchEdge: Int = FAST_SEARCH_EDGE,
+        onEarlyCandidate: (FloatArray) -> Boolean = { false }
+    ): List<FloatArray> {
+        val scale = min(1f, maxSearchEdge.toFloat() / max(bitmap.width, bitmap.height))
         val reduced = if (scale < 1f) Bitmap.createScaledBitmap(
             bitmap,
             (bitmap.width * scale).roundToInt().coerceAtLeast(1),

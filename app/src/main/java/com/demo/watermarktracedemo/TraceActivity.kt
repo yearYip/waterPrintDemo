@@ -292,16 +292,15 @@ class TraceActivity : AppCompatActivity() {
                 first.left.toFloat(), first.bottom.toFloat()
             ))?.let { return DecodeResult(it) }
         }
-        val reader = FrequencyWatermark.Reader(bitmap)
-        return decodeLocated(bitmap, reader, onProgress)
+        return decodeLocated(bitmap, onProgress)
     }
 
     private fun decodeLocated(
         bitmap: Bitmap,
-        reader: FrequencyWatermark.Reader,
         onProgress: (String) -> Unit,
         manualCorners: FloatArray? = null
     ): DecodeResult {
+        val reader = FrequencyWatermark.Reader(bitmap)
         if (manualCorners != null) {
             onProgress("正在校正选中区域…")
             reader.extract(manualCorners)?.let { return DecodeResult(it) }
@@ -328,8 +327,8 @@ class TraceActivity : AppCompatActivity() {
         fun toSourceCorners(localCorners: FloatArray): FloatArray = FloatArray(localCorners.size) { index ->
             localCorners[index] + (if (index % 2 == 0) bounds.left else bounds.top).toFloat()
         }
-        val candidates = try {
-            CornerLocator.candidates(searchBitmap) { localCorners ->
+        fun findCandidates(maxSearchEdge: Int): List<FloatArray> =
+            CornerLocator.candidates(searchBitmap, maxSearchEdge) { localCorners ->
                 val corners = toSourceCorners(localCorners)
                 if (manualCorners != null && !candidateCenterInside(corners, manualCorners)) {
                     false
@@ -342,6 +341,15 @@ class TraceActivity : AppCompatActivity() {
             }.map(::toSourceCorners).filter { corners ->
                 manualCorners == null || candidateCenterInside(corners, manualCorners)
             }
+        val candidates = try {
+            var found = findCandidates(CornerLocator.FAST_SEARCH_EDGE)
+            if (found.isEmpty() && earlyPayload == null &&
+                maxOf(searchBitmap.width, searchBitmap.height) > CornerLocator.FAST_SEARCH_EDGE
+            ) {
+                onProgress("常规定位未找到候选区域，正在高清重试…")
+                found = findCandidates(CornerLocator.RETRY_SEARCH_EDGE)
+            }
+            found
         } finally {
             if (searchBitmap !== bitmap) searchBitmap.recycle()
         }
@@ -468,8 +476,7 @@ class TraceActivity : AppCompatActivity() {
         onProgress("正在校正并验证选中区域…")
         val png = readExactPngRegion(source, corners)
         png.payload?.let { return DecodeResult(it) }
-        val reader = FrequencyWatermark.Reader(source)
-        val decoded = decodeLocated(source, reader, onProgress, corners)
+        val decoded = decodeLocated(source, onProgress, corners)
         return decoded.copy(pngFailure = strongerPngFailure(png.failure, decoded.pngFailure))
     }
 

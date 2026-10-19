@@ -53,12 +53,13 @@ object HalfToneWatermark {
     }
 
     fun findInScreenshot(bmp: Bitmap): WatermarkPayload? {
-        val magic = 0x574d4b32 // "WMK2", MSB first
+        val legacyMagic = 0x574d4b32 // "WMK2", MSB first
+        val compactMagic = 0x574d4b33 // "WMK3", MSB first
         for (y in 0 until bmp.height) {
             var window = 0
             for (x in 0 until bmp.width) {
                 window = (window shl 1) or (Color.blue(bmp.getPixel(x, y)) and 1)
-                if (x < 31 || window != magic) continue
+                if (x < 31 || (window != legacyMagic && window != compactMagic)) continue
                 val startX = x - 31
                 if (startX + WatermarkPayload.HEADER_BITS > bmp.width) continue
                 val header = extractRow(bmp, startX, y, WatermarkPayload.HEADER_BITS)

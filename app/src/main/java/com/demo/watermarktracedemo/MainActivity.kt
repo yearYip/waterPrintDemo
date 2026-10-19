@@ -79,7 +79,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val bits = try {
-            WatermarkPayload(userId, deviceId, System.currentTimeMillis()).toBitArray()
+            val payload = WatermarkPayload(userId, deviceId, System.currentTimeMillis())
+            payload.toBitArray()
         } catch (e: IllegalArgumentException) {
             etUserId.error = e.message
             return

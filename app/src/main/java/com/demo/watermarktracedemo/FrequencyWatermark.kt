@@ -13,7 +13,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
- * Version 2: zero-DC DCT/QIM watermark on a normalized image grid.
+ * Zero-DC DCT/QIM carrier with compact WMK3 and legacy WMK2 frequency framing.
  *
  * Normalization is part of both embedding and extraction, rather than assuming
  * that a screenshot has the same pixel dimensions as the saved PNG.
@@ -27,15 +27,16 @@ object FrequencyWatermark {
         WEAK_SIGNAL,
         INVALID_PAYLOAD
     }
-    const val MAX_PAYLOAD_BITS = 512
+    const val MAX_PAYLOAD_BITS = FrequencyPayloadCodec.MAX_PAYLOAD_BITS
     private const val SIZE = 512
     private const val BLOCK = 8
     private const val GRID = SIZE / BLOCK
     private const val BLOCKS = GRID * GRID
     private const val PILOTS = 512
-    private const val CODE_BITS = (MAX_PAYLOAD_BITS + 6) * 2
     private const val PERIOD = 20.0
     private val extractionGains = doubleArrayOf(0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3, 1.4, 1.5)
+    private val recoveryGains = doubleArrayOf(0.65, 0.75, 1.6, 1.7, 1.8, 2.0, 2.2)
+    private val alignmentGains = extractionGains + recoveryGains
     private val basis = DoubleArray(BLOCK * BLOCK) { index ->
         val x = index % BLOCK
         val y = index / BLOCK
@@ -65,7 +66,8 @@ object FrequencyWatermark {
         val originalPlane = Plane.fromPixels(original, source.width, source.height)
         val normalized = normalize(originalPlane, fullCorners(source.width, source.height))
             ?: error("无法建立水印坐标")
-        val code = encode(bits)
+        val code = FrequencyPayloadCodec.encode(bits)
+        check(code.size == BLOCKS - PILOTS)
         val targets = DoubleArray(BLOCKS) { Double.NaN }
         val blockLimits = FloatArray(BLOCKS) { 2f }
         var available = 0
@@ -78,7 +80,7 @@ object FrequencyWatermark {
                 (smooth && statistics.mean < 96)
             ) continue
             if (smooth) blockLimits[block] = 1f
-            val bit = if (logical < PILOTS) pilotBits[logical] else code[(logical - PILOTS) % CODE_BITS]
+            val bit = if (logical < PILOTS) pilotBits[logical] else code[logical - PILOTS]
             val coefficient = coefficient(normalized, block)
             val center = if (bit) PERIOD * 0.75 else PERIOD * 0.25
             targets[block] = Math.rint((coefficient - center) / PERIOD) * PERIOD + center
@@ -231,6 +233,8 @@ object FrequencyWatermark {
             }
             if (bestScore > 0.25) decode(source, best, onFailure)?.let { return it }
         }
+        // Weak pilots may still carry a CRC-valid payload after corner correction.
+        if (bestScore > 0.08) decode(source, best, onFailure)?.let { return it }
         return null
     }
 
@@ -257,8 +261,9 @@ object FrequencyWatermark {
             onFailure(FailureReason.INSUFFICIENT_BLOCKS)
             return null
         }
-        // Resampling attenuates AC coefficients. Estimate that gain from known pilots.
-        val gains = extractionGains.map { gain ->
+        // Keep the usual decode path first. Compression can attenuate coefficients beyond
+        // its gain range, so retry only after it fails; CRC rejects spurious decodes.
+        fun rankedGains(values: DoubleArray) = values.map { gain ->
             var sum = 0.0
             for (i in 0 until PILOTS) {
                 if (!eligible[i]) continue
@@ -267,24 +272,31 @@ object FrequencyWatermark {
             }
             gain to sum / pilotCount
         }.sortedByDescending { it.second }
-        var triedPayload = false
-        for ((gain, score) in gains.take(3)) {
-            if (score < 0.22) continue
-            triedPayload = true
-            val votes = DoubleArray(CODE_BITS)
+        fun decodeAt(gain: Double): WatermarkPayload? {
+            val votes = DoubleArray(BLOCKS - PILOTS)
             for (i in PILOTS until BLOCKS) {
-                if (eligible[i]) votes[(i - PILOTS) % CODE_BITS] +=
+                if (eligible[i]) votes[i - PILOTS] =
                     sin(2 * PI * coefficients[i] * gain / PERIOD)
             }
-            WatermarkPayload.fromBitArray(viterbi(votes))?.let { return it }
+            return FrequencyPayloadCodec.decode(votes)
         }
-        onFailure(if (triedPayload) FailureReason.INVALID_PAYLOAD else FailureReason.WEAK_SIGNAL)
+        var reliableSignal = false
+        for ((gain, score) in rankedGains(extractionGains).take(3)) {
+            if (score < 0.22) continue
+            reliableSignal = true
+            decodeAt(gain)?.let { return it }
+        }
+        for ((gain, score) in rankedGains(recoveryGains).take(3)) {
+            if (score < 0.08) continue
+            decodeAt(gain)?.let { return it }
+        }
+        onFailure(if (reliableSignal) FailureReason.INVALID_PAYLOAD else FailureReason.WEAK_SIGNAL)
         return null
     }
 
     private fun pilotScore(source: Plane, corners: FloatArray): Double {
         val map = mapping(corners) ?: return -1.0
-        val scores = DoubleArray(extractionGains.size)
+        val scores = DoubleArray(alignmentGains.size)
         var count = 0
         for (logical in 0 until 128) {
             val block = order[logical * 4]
@@ -309,8 +321,8 @@ object FrequencyWatermark {
             val textureVariance = square / 64 - mean * mean -
                 (slopeX * slopeX + slopeY * slopeY) / (336 * 64)
             if (!readable(mean, textureVariance)) continue
-            for (i in extractionGains.indices) {
-                val soft = sin(2 * PI * coefficient * extractionGains[i] / PERIOD)
+            for (i in alignmentGains.indices) {
+                val soft = sin(2 * PI * coefficient * alignmentGains[i] / PERIOD)
                 scores[i] += if (pilotBits[logical * 4]) -soft else soft
             }
             count++
@@ -354,52 +366,6 @@ object FrequencyWatermark {
         val textureVariance = square / 64 - mean * mean -
             (slopeX * slopeX + slopeY * slopeY) / (336 * 64)
         return Statistics(mean, textureVariance.coerceAtLeast(0.0))
-    }
-
-    private fun encode(bits: BooleanArray): BooleanArray {
-        val output = BooleanArray(CODE_BITS)
-        var state = 0
-        for (time in 0 until MAX_PAYLOAD_BITS + 6) {
-            val bit = if (time < bits.size && bits[time]) 1 else 0
-            val register = (state shl 1) or bit
-            output[time * 2] = Integer.bitCount(register and 0x6d) % 2 != 0
-            output[time * 2 + 1] = Integer.bitCount(register and 0x4f) % 2 != 0
-            state = register and 63
-        }
-        return output
-    }
-
-    private fun viterbi(votes: DoubleArray): BooleanArray {
-        val times = MAX_PAYLOAD_BITS + 6
-        var metrics = DoubleArray(64) { Double.NEGATIVE_INFINITY }.apply { this[0] = 0.0 }
-        val previous = Array(times) { IntArray(64) }
-        for (time in 0 until times) {
-            val next = DoubleArray(64) { Double.NEGATIVE_INFINITY }
-            for (state in 0 until 64) {
-                if (!metrics[state].isFinite()) continue
-                for (bit in 0..1) {
-                    val register = (state shl 1) or bit
-                    val destination = register and 63
-                    val a = Integer.bitCount(register and 0x6d) % 2
-                    val b = Integer.bitCount(register and 0x4f) % 2
-                    val metric = metrics[state] +
-                        votes[time * 2] * (if (a == 0) 1 else -1) +
-                        votes[time * 2 + 1] * (if (b == 0) 1 else -1)
-                    if (metric > next[destination]) {
-                        next[destination] = metric
-                        previous[time][destination] = state
-                    }
-                }
-            }
-            metrics = next
-        }
-        val bits = BooleanArray(MAX_PAYLOAD_BITS)
-        var state = 0
-        for (time in times - 1 downTo 0) {
-            if (time < bits.size) bits[time] = state and 1 != 0
-            state = previous[time][state]
-        }
-        return bits
     }
 
     private fun fullCorners(width: Int, height: Int) = floatArrayOf(
