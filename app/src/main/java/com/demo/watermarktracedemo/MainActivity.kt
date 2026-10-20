@@ -85,7 +85,7 @@ class MainActivity : AppCompatActivity() {
             etUserId.error = e.message
             return
         }
-        if (bits.size > DwtDctSvdWatermark.MAX_PAYLOAD_BITS) {
+        if (bits.size > DctWatermark.MAX_PAYLOAD_BITS) {
             etUserId.error = "用户 ID 过长，无法放入隐形水印"
             return
         }
@@ -112,11 +112,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 result.onSuccess { generated ->
                     watermarkView.setWatermarkBitmap(generated.bitmap)
-                    val summary = if (generated.regions > 1) {
-                        "已写入 ${generated.regions} 个 DWT-DCT-SVD 水印区域。局部图片需保留至少一个完整区域。"
-                    } else {
-                        "水印已生成。"
-                    }
+                    val summary = "已写入重复 DCT 水印。局部截图建议保留至少 320×256 像素的图片内容；用户 ID 越长，所需宽度可能越大。"
                     val timedSummary = "生成用时 ${elapsedText(startedAt)}。$summary"
                     status.text = timedSummary
                     saveImageToGallery(generated.bitmap, timedSummary)

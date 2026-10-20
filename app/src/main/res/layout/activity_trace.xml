@@ -56,7 +56,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:text="蓝框可包含一个或多个完整水印区域，程序会在框内寻找候选角点。红框仅表示候选区域；点击红框可选取四角，也可手动点选四角并拖动蓝点调整。"
+            android:text="截图包含外部界面时，请按左上、右上、右下、左下顺序选取带水印的图片区域，可拖动蓝点调整。局部截图建议保留至少 320×256 像素的图片内容。"
             android:visibility="gone" />
 
         <com.demo.watermarktracedemo.QuadSelectionView

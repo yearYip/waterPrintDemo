@@ -1,6 +1,6 @@
 # 4.0：角点定位水印
 
-5.1.3 沿用本页的普通水印载体与定位流程，使用 WMK3 紧凑编码并兼容 WMK2。有纹理区域的导频上限调整及版本变化见 [watermark-v5.md](watermark-v5.md)。当前 5.2.0 的算法见 [DWT-DCT-SVD 水印试验版](watermark-dwt-dct-svd.md)。
+5.1.3 沿用本页的普通水印载体与定位流程，使用 WMK3 紧凑编码并兼容 WMK2。有纹理区域的导频上限调整及版本变化见 [watermark-v5.md](watermark-v5.md)。当前 5.6.1 的算法见 [重复分块 DCT 水印](watermark-dct.md)。
 
 下文记录 4.0 的 WMK2 设计；5.1 新生成图片使用 WMK3。旧版 WMK1 图片不会被新版解析器识别。
 

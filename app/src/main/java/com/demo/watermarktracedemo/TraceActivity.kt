@@ -2,7 +2,6 @@ package com.demo.watermarktracedemo
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Rect
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
@@ -18,8 +17,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.ceil
-import kotlin.math.floor
 import kotlin.math.roundToInt
 import java.util.Locale
 
@@ -99,9 +96,9 @@ class TraceActivity : AppCompatActivity() {
                         showPayload(decoded.payload, startedAt)
                     } else {
                         val message = if (decoded.noCompleteRegion) {
-                            "自动定位失败：未找到候选水印区域（用时 ${elapsedText(startedAt)}）。请手动选取完整区域的四角。"
+                            "图片未能读出水印（用时 ${elapsedText(startedAt)}）。请手动选取带水印图片区域的四角。"
                         } else {
-                            "已找到候选区域，但未能解析出有效水印（用时 ${elapsedText(startedAt)}）。${diagnosticText(decoded.frequencyFailure)}点击红框选取四角，可拖动蓝点调整。"
+                            "未能解析出有效水印（用时 ${elapsedText(startedAt)}）。${diagnosticText(decoded.frequencyFailure)}请点选四角，可拖动蓝点调整。"
                         }
                         showAlignment(bitmap, message, decoded.candidateRegions)
                     }
@@ -127,7 +124,7 @@ class TraceActivity : AppCompatActivity() {
                         var previewCandidates: List<FloatArray> = emptyList()
                         var previewTimeMs = 0L
                         var foundRegion = false
-                        var frequencyFailure: DwtDctSvdWatermark.FailureReason? = null
+                        var frequencyFailure: DctWatermark.FailureReason? = null
                         for ((index, timeMs) in times.withIndex()) {
                             showProgress("正在抽取录屏画面 ${index + 1}/${times.size}…")
                             val frame = retriever.getFrameAtTime(
@@ -171,9 +168,9 @@ class TraceActivity : AppCompatActivity() {
                                 .roundToInt().coerceIn(0, 1000)
                         } else 0
                         val message = if (scan.noCompleteRegion) {
-                            "自动定位失败：抽样帧中未找到候选水印区域（用时 ${elapsedText(startedAt)}）。可拖动视频位置，再手动选取完整区域的四角。"
+                            "抽样帧未读出水印（用时 ${elapsedText(startedAt)}）。可拖动视频位置，再手动选取带水印图片区域的四角。"
                         } else {
-                            "抽样帧中已找到候选区域，但未能解析出有效水印（用时 ${elapsedText(startedAt)}）。${diagnosticText(scan.frequencyFailure)}点击红框选取四角，可拖动蓝点调整。"
+                            "抽样帧未能解析出有效水印（用时 ${elapsedText(startedAt)}）。${diagnosticText(scan.frequencyFailure)}请点选四角，可拖动蓝点调整。"
                         }
                         showAlignment(
                             scan.frame!!,
@@ -205,7 +202,7 @@ class TraceActivity : AppCompatActivity() {
             result.fold(
                 onSuccess = { frame ->
                     hideAlignment()
-                    showAlignment(frame, "请按左上、右上、右下、左下顺序选取整张图片或一个完整水印区域的四角。")
+                    showAlignment(frame, "请按左上、右上、右下、左下顺序选取带水印图片区域的四角。")
                 },
                 onFailure = { tvResult.text = "载入帧失败：${it.message ?: "未知错误"}" }
             )
@@ -256,10 +253,10 @@ class TraceActivity : AppCompatActivity() {
                 onSuccess = { decoded ->
                     if (decoded.payload != null) showPayload(decoded.payload, startedAt)
                     else if (decoded.noCompleteRegion) {
-                        tvResult.text = "蓝框内未找到候选水印区域，也未能直接读取水印（用时 ${elapsedText(startedAt)}）。${diagnosticText(decoded.frequencyFailure)}请扩大蓝框，确保包含一个完整区域。"
+                        tvResult.text = "选中区域未能读出水印（用时 ${elapsedText(startedAt)}）。${diagnosticText(decoded.frequencyFailure)}请确保四角覆盖带水印的图片区域。"
                     } else {
                         if (videoUri == null) selection.setCandidateRegions(decoded.candidateRegions)
-                        tvResult.text = "蓝框内已找到候选区域，但未能解析出有效水印（用时 ${elapsedText(startedAt)}）。${diagnosticText(decoded.frequencyFailure)}请调整四角，或尝试其他完整区域。"
+                        tvResult.text = "选中区域未能解析出有效水印（用时 ${elapsedText(startedAt)}）。${diagnosticText(decoded.frequencyFailure)}请调整四角，确保覆盖带水印的图片区域。"
                     }
                 },
                 onFailure = { tvResult.text = "选中区域处理出错（用时 ${elapsedText(startedAt)}）：${it.message ?: "未知错误"}" }
@@ -269,142 +266,29 @@ class TraceActivity : AppCompatActivity() {
 
     private fun decodeAutomatic(bitmap: Bitmap, onProgress: (String) -> Unit): DecodeResult {
         onProgress("正在读取水印数据…")
-        val reader = DwtDctSvdWatermark.Reader(bitmap)
-        val regions = MultiRegionWatermark.regions(bitmap.width, bitmap.height)
-        for (region in regions) {
-            reader.extract(floatArrayOf(
-                region.left.toFloat(), region.top.toFloat(),
-                region.right.toFloat(), region.top.toFloat(),
-                region.right.toFloat(), region.bottom.toFloat(),
-                region.left.toFloat(), region.bottom.toFloat()
-            ), refine = false)?.let { return DecodeResult(it) }
-        }
-        return decodeLocated(bitmap, onProgress, reader = reader)
+        val reader = DctWatermark.Reader(bitmap)
+        val payload = reader.extract(onProgress = onProgress)
+        return DecodeResult(payload = payload, frequencyFailure = reader.bestFailure)
     }
-
-    private fun decodeLocated(
-        bitmap: Bitmap,
-        onProgress: (String) -> Unit,
-        manualCorners: FloatArray? = null,
-        reader: DwtDctSvdWatermark.Reader = DwtDctSvdWatermark.Reader(bitmap)
-    ): DecodeResult {
-        if (manualCorners != null) {
-            onProgress("正在校正选中区域…")
-            reader.extract(manualCorners)?.let { return DecodeResult(it) }
-        }
-        val bounds = if (manualCorners != null) {
-            selectedBounds(bitmap, manualCorners) ?: return DecodeResult(
-                noCompleteRegion = true,
-                frequencyFailure = DwtDctSvdWatermark.FailureReason.INVALID_GEOMETRY
-            )
-        } else {
-            Rect(0, 0, bitmap.width, bitmap.height)
-        }
-        onProgress(if (manualCorners == null) "正在寻找水印角点…" else "正在蓝框内寻找水印角点…")
-        var earlyPayload: WatermarkPayload? = null
-        val searchBitmap = if (manualCorners == null) bitmap else Bitmap.createBitmap(
-            bitmap, bounds.left, bounds.top, bounds.width(), bounds.height()
-        )
-        fun toSourceCorners(localCorners: FloatArray): FloatArray = FloatArray(localCorners.size) { index ->
-            localCorners[index] + (if (index % 2 == 0) bounds.left else bounds.top).toFloat()
-        }
-        fun findCandidates(maxSearchEdge: Int): List<FloatArray> =
-            CornerLocator.candidates(searchBitmap, maxSearchEdge) { localCorners ->
-                val corners = toSourceCorners(localCorners)
-                if (manualCorners != null && !candidateCenterInside(corners, manualCorners)) {
-                    false
-                } else {
-                    onProgress("已找到候选区域，正在校验水印…")
-                    earlyPayload = reader.extract(corners, refine = false)
-                    earlyPayload != null
-                }
-            }.map(::toSourceCorners).filter { corners ->
-                manualCorners == null || candidateCenterInside(corners, manualCorners)
-            }
-        val candidates = try {
-            var found = findCandidates(CornerLocator.FAST_SEARCH_EDGE)
-            if (found.isEmpty() && earlyPayload == null &&
-                maxOf(searchBitmap.width, searchBitmap.height) > CornerLocator.FAST_SEARCH_EDGE
-            ) {
-                onProgress("常规定位未找到候选区域，正在高清重试…")
-                found = findCandidates(CornerLocator.RETRY_SEARCH_EDGE)
-            }
-            found
-        } finally {
-            if (searchBitmap !== bitmap) searchBitmap.recycle()
-        }
-        earlyPayload?.let { return DecodeResult(it) }
-        if (candidates.isEmpty()) return DecodeResult(
-            noCompleteRegion = true,
-            frequencyFailure = reader.bestFailure
-        )
-        onProgress("正在校正候选区域…")
-        for (corners in candidates) {
-            reader.extract(corners, refine = false)?.let { return DecodeResult(it) }
-        }
-        val refinedCandidates = if (manualCorners == null) candidates.take(4) else candidates
-        for ((index, corners) in refinedCandidates.withIndex()) {
-            onProgress("正在校正候选区域 ${index + 1}/${refinedCandidates.size}…")
-            reader.extract(corners)?.let { return DecodeResult(it) }
-        }
-        return DecodeResult(
-            candidateRegions = candidates,
-            frequencyFailure = reader.bestFailure
-        )
-    }
-
-    private fun selectedBounds(bitmap: Bitmap, corners: FloatArray): Rect? {
-        if (corners.size != 8 || corners.any { !it.isFinite() }) return null
-        val left = floor(minOf(corners[0], corners[2], corners[4], corners[6]).toDouble())
-            .toInt().coerceIn(0, bitmap.width - 1)
-        val top = floor(minOf(corners[1], corners[3], corners[5], corners[7]).toDouble())
-            .toInt().coerceIn(0, bitmap.height - 1)
-        val right = ceil(maxOf(corners[0], corners[2], corners[4], corners[6]).toDouble())
-            .toInt().coerceIn(left + 1, bitmap.width)
-        val bottom = ceil(maxOf(corners[1], corners[3], corners[5], corners[7]).toDouble())
-            .toInt().coerceIn(top + 1, bitmap.height)
-        return Rect(left, top, right, bottom).takeIf { it.width() >= 32 && it.height() >= 32 }
-    }
-
-    private fun candidateCenterInside(candidate: FloatArray, selection: FloatArray): Boolean {
-        val x = (candidate[0] + candidate[2] + candidate[4] + candidate[6]) / 4f
-        val y = (candidate[1] + candidate[3] + candidate[5] + candidate[7]) / 4f
-        var inside = false
-        var previous = 3
-        for (index in 0 until 4) {
-            val x1 = selection[index * 2]
-            val y1 = selection[index * 2 + 1]
-            val x2 = selection[previous * 2]
-            val y2 = selection[previous * 2 + 1]
-            if ((y1 > y) != (y2 > y) && x < (x2 - x1) * (y - y1) / (y2 - y1) + x1) {
-                inside = !inside
-            }
-            previous = index
-        }
-        return inside
-    }
-
     private fun strongerFailure(
-        first: DwtDctSvdWatermark.FailureReason?,
-        second: DwtDctSvdWatermark.FailureReason?
-    ): DwtDctSvdWatermark.FailureReason? = when {
+        first: DctWatermark.FailureReason?,
+        second: DctWatermark.FailureReason?
+    ): DctWatermark.FailureReason? = when {
         first == null -> second
         second == null || first.ordinal >= second.ordinal -> first
         else -> second
     }
 
-    private fun diagnosticText(reason: DwtDctSvdWatermark.FailureReason?): String =
+    private fun diagnosticText(reason: DctWatermark.FailureReason?): String =
         frequencyFailureText(reason).takeIf { it.isNotEmpty() }?.let { "\n$it\n" } ?: ""
 
-    private fun frequencyFailureText(reason: DwtDctSvdWatermark.FailureReason?): String = when (reason) {
-        DwtDctSvdWatermark.FailureReason.INVALID_GEOMETRY ->
-            "DWT-DCT-SVD 诊断：无法建立有效的区域坐标。"
-        DwtDctSvdWatermark.FailureReason.INSUFFICIENT_BLOCKS ->
-            "DWT-DCT-SVD 诊断：可用数据块不足。"
-        DwtDctSvdWatermark.FailureReason.WEAK_SIGNAL ->
-            "DWT-DCT-SVD 诊断：未检测到足够强的水印信号。"
-        DwtDctSvdWatermark.FailureReason.INVALID_PAYLOAD ->
-            "DWT-DCT-SVD 诊断：水印格式或 CRC 校验未通过。"
+    private fun frequencyFailureText(reason: DctWatermark.FailureReason?): String = when (reason) {
+        DctWatermark.FailureReason.INVALID_GEOMETRY ->
+            "DCT 诊断：无法建立有效的区域坐标。"
+        DctWatermark.FailureReason.INSUFFICIENT_BLOCKS ->
+            "DCT 诊断：可用数据块不足。"
+        DctWatermark.FailureReason.INVALID_PAYLOAD ->
+            "DCT 诊断：水印格式或 CRC 校验未通过。"
         null -> ""
     }
 
@@ -431,7 +315,9 @@ class TraceActivity : AppCompatActivity() {
         onProgress: (String) -> Unit
     ): DecodeResult {
         onProgress("正在校正并验证选中区域…")
-        return decodeLocated(source, onProgress, corners)
+        val reader = DctWatermark.Reader(source)
+        val payload = reader.extract(corners, onProgress)
+        return DecodeResult(payload = payload, frequencyFailure = reader.bestFailure)
     }
 
     private inline fun <T> withRetriever(uri: Uri, block: (MediaMetadataRetriever) -> T): T {
@@ -510,14 +396,14 @@ class TraceActivity : AppCompatActivity() {
         val noCompleteRegion: Boolean,
         val candidateRegions: List<FloatArray> = emptyList(),
         val previewTimeMs: Long = 0L,
-        val frequencyFailure: DwtDctSvdWatermark.FailureReason? = null
+        val frequencyFailure: DctWatermark.FailureReason? = null
     )
 
     private data class DecodeResult(
         val payload: WatermarkPayload? = null,
         val noCompleteRegion: Boolean = false,
         val candidateRegions: List<FloatArray> = emptyList(),
-        val frequencyFailure: DwtDctSvdWatermark.FailureReason? = null
+        val frequencyFailure: DctWatermark.FailureReason? = null
     )
 
 }
