@@ -85,7 +85,7 @@ class MainActivity : AppCompatActivity() {
             etUserId.error = e.message
             return
         }
-        if (bits.size > FrequencyWatermark.MAX_PAYLOAD_BITS) {
+        if (bits.size > DwtDctSvdWatermark.MAX_PAYLOAD_BITS) {
             etUserId.error = "用户 ID 过长，无法放入隐形水印"
             return
         }
@@ -113,26 +113,11 @@ class MainActivity : AppCompatActivity() {
                 result.onSuccess { generated ->
                     watermarkView.setWatermarkBitmap(generated.bitmap)
                     val summary = if (generated.regions > 1) {
-                        "已写入 ${generated.regions} 个完整水印区域，其中 ${generated.screenshotRegions} 个支持缩放截图回读。局部图片需保留至少一个完整区域。"
-                    } else if (generated.screenshotVerified) {
-                        "水印已生成，已通过原图和缩放回读校验。"
+                        "已写入 ${generated.regions} 个 DWT-DCT-SVD 水印区域。局部图片需保留至少一个完整区域。"
                     } else {
-                        "水印已生成：请使用保存的 PNG 原图解析。当前图片未通过截图提取校验。"
+                        "水印已生成。"
                     }
-                    val compressionSummary = generated.compressionChecks.joinToString("\n") { check ->
-                        if (check.error != null) {
-                            "模拟 WebP 质量 ${check.quality}：检查未完成（${check.error}）。"
-                        } else {
-                            val score = String.format(Locale.ROOT, "%.3f", check.bestPilotScore)
-                            "模拟 WebP 质量 ${check.quality}（${check.width}×${check.height}）：" +
-                                "已知区域回读 ${check.readableRegions}/${check.totalRegions}；" +
-                                "最高导频分数 $score（可用导频最多 ${check.maxReadablePilots}/512）；" +
-                                "定位${if (check.candidateFound) "有候选" else "未找到候选"}；" +
-                                "自动回读${if (check.automaticReadable) "通过" else "失败"}。"
-                        }
-                    }
-                    val timedSummary = "生成及校验用时 ${elapsedText(startedAt)}。$summary\n" +
-                        compressionSummary + "\n模拟结果仅适用于本次压缩参数，实际软件传输后请再次测试。"
+                    val timedSummary = "生成用时 ${elapsedText(startedAt)}。$summary"
                     status.text = timedSummary
                     saveImageToGallery(generated.bitmap, timedSummary)
                 }.onFailure {

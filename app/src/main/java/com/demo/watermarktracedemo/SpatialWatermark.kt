@@ -10,7 +10,7 @@ import kotlin.math.roundToInt
 
 /**
  * Legacy spatial watermark format, retained for older generated images.
- * New image generation uses FrequencyWatermark; do not use the rectangular
+ * New image generation uses DwtDctSvdWatermark; do not use the rectangular
  * luminance offsets below for new photographs.
  */
 object SpatialWatermark {

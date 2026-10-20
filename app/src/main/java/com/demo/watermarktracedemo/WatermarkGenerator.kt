@@ -2,29 +2,12 @@ package com.demo.watermarktracedemo
 
 import android.graphics.Bitmap
 
-/** Keeps invisibility first while explicitly reporting the extraction capability. */
 object WatermarkGenerator {
-    data class Result(
-        val bitmap: Bitmap,
-        val screenshotVerified: Boolean,
-        val regions: Int = 1,
-        val screenshotRegions: Int = 0,
-        val compressionChecks: List<WatermarkCompressionCheck.Result> = emptyList()
-    )
+    data class Result(val bitmap: Bitmap, val regions: Int)
 
     fun generate(source: Bitmap, bits: BooleanArray, onProgress: (String) -> Unit = {}): Result {
-        val expected = WatermarkPayload.fromBitArray(bits) ?: error("水印数据无效")
-        require(bits.size <= FrequencyWatermark.MAX_PAYLOAD_BITS) { "用户 ID 过长" }
+        require(bits.size <= DwtDctSvdWatermark.MAX_PAYLOAD_BITS) { "用户 ID 过长" }
         val result = MultiRegionWatermark.embed(source, bits, onProgress)
-        try {
-            val checks = WatermarkCompressionCheck.verify(result.bitmap, expected, onProgress)
-            return Result(
-                result.bitmap, result.screenshotRegions > 0,
-                result.regions, result.screenshotRegions, checks
-            )
-        } catch (e: Exception) {
-            result.bitmap.recycle()
-            throw e
-        }
+        return Result(result.bitmap, result.regions)
     }
 }

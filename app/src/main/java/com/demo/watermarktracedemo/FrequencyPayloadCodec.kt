@@ -1,6 +1,6 @@
 package com.demo.watermarktracedemo
 
-/** Frequency framing only; carrier geometry, pilots, QIM period and strength stay in FrequencyWatermark. */
+/** Error correction and CRC-framed payload bits for the DWT-DCT-SVD carrier. */
 internal object FrequencyPayloadCodec {
     const val MAX_PAYLOAD_BITS = 512
     const val DATA_BLOCKS = 3584
